@@ -2849,6 +2849,11 @@ void llama_memory_kvmem::decode_mean_commit(uint32_t n_keep) {
     decode_mean_discard();
 }
 
+bool llama_memory_kvmem::has_attention_layer(int32_t il) const {
+    // KVarN 元数据缓存不含 K/V 层，语义索引应查询实际压缩缓存。
+    return kvarn_ ? kvarn_->has_layer(il) : kvmem_cache_has_layer(kv_, il);
+}
+
 void llama_memory_kvmem::decode_mean_flush() {
     if (decode_mean_n_ == 0 || !raw_ || decode_mean_block_ == ~0u) {
         return;
@@ -2860,7 +2865,7 @@ void llama_memory_kvmem::decode_mean_flush() {
     uint32_t n_host = 0;
     float rms = 0.0f;
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+        if (!has_attention_layer(static_cast<int32_t>(il))) {
             continue;
         }
         const uint8_t src = (il < decode_mean_src_.size()) ? decode_mean_src_[il] : 0;
@@ -3296,7 +3301,7 @@ bool llama_memory_kvmem::get_query(llama_kvmem_query_state & state) {
     bool any = false;
     uint32_t rows = 0;
     for (uint32_t il = 0; il < n_layer_; ++il) {
-        if (!kvmem_cache_has_layer(kv_, il)) continue;
+        if (!has_attention_layer(il)) continue;
         if (!q_count_[il] || (rows && rows != q_count_[il])) return false;
         rows = q_count_[il];
         any = true;
@@ -3314,7 +3319,7 @@ bool llama_memory_kvmem::set_query(const llama_kvmem_query_state & state) {
         const auto & v = state.sum[il];
         if (v.size() != n_head_ * n_embd_head_ ||
                 !std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); })) return false;
-        if (!kvmem_cache_has_layer(kv_, il)) continue;
+        if (!has_attention_layer(il)) continue;
         if (!state.count[il] || (rows && rows != state.count[il])) return false;
         rows = state.count[il];
     }

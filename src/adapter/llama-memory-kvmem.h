@@ -194,6 +194,7 @@ public:
     kvmem::RawKvStore & raw() { return *raw_; }
 
 private:
+    bool has_attention_layer(int32_t il) const;
     friend struct kvmem_transfer_test_access;
     struct SlotBackend : public kvmem::KvMemBackend {
         llama_memory_kvmem * owner = nullptr;

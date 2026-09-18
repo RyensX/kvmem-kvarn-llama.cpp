@@ -1072,7 +1072,7 @@ index 835f8881464d020400cd8c92443d31517be22b2a..5816a725be6b371ca19f8545d678346f
          ggml_context * ctx, int32_t il, bool value) const {
      const auto & layer = layer_for(il);
 diff --git a/src/llama-kv-cache-kvarn.h b/src/llama-kv-cache-kvarn.h
-index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..d68c4a96593dec44a448c4bd1a13adaf3104baf9 100644
+index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..ce763ac9bb32aa4fd2b7ddfb78e44fbe555a1b13 100644
 --- a/src/llama-kv-cache-kvarn.h
 +++ b/src/llama-kv-cache-kvarn.h
 @@ -89,7 +89,8 @@ public:
@@ -1093,7 +1093,15 @@ index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..d68c4a96593dec44a448c4bd1a13adaf
      mutable std::vector<int64_t> compact_read_plan_cache;
      llama_context * update_lctx;
  
-@@ -300,6 +302,12 @@ public:
+@@ -287,6 +289,7 @@ public:
+     llama_kv_cache * get_metadata_cache() const;
+     ggml_tensor * get_materialization_source(int32_t il, bool value) const;
+     std::unique_ptr<llama_kv_cache> make_shared_metadata_cache(const llama_model & model_view) const;
++    bool has_layer(int32_t il) const { return map_layer_ids.find(il) != map_layer_ids.end(); }
+     int32_t mapped_layer_id(int32_t il) const;
+     llama_kv_tail_route get_tail_route(int32_t il) const;
+     bool get_tail_explicit_bias(int32_t il) const;
+@@ -300,6 +303,12 @@ public:
      bool mixed_tail_native_preferred(int32_t il) const;
      bool native_attention_uses_original_v(int32_t il) const;
      uint32_t native_rotated_max_query_tokens(int32_t il) const;
@@ -1106,7 +1114,7 @@ index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..d68c4a96593dec44a448c4bd1a13adaf
  
      // Reference-faithful staging keeps one incomplete 128-token group lossless.
      // Completed records are committed eagerly, so physical ubatch size does not
-@@ -378,6 +386,9 @@ private:
+@@ -378,6 +387,9 @@ private:
      const uint32_t n_stream;
      const uint32_t n_seq_max;
      const uint32_t kv_size;
