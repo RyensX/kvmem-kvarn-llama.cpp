@@ -9,6 +9,9 @@ vendored into the main repository.
 patch without creating commits. Both are repeatable and reject an unexpected
 submodule revision or a partially modified tree.
 
+`windows-jinja-encoding-upgrade.patch` upgrades a tree that had the preceding
+cumulative patch applied before the Windows source-encoding fix.
+
 To check a clean extraction without changing the active submodule:
 
 ```bash

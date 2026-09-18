@@ -1,0 +1,12 @@
+diff --git a/common/jinja/utils.h b/common/jinja/utils.h
+--- a/common/jinja/utils.h
++++ b/common/jinja/utils.h
+@@ -34,7 +34,7 @@ static std::string peak_source(const std::string & source, size_t pos, size_t ma
+     size_t start = (pos >= max_peak_chars) ? (pos - max_peak_chars) : 0;
+     size_t end = std::min(pos + max_peak_chars, source.length());
+     std::string substr = source.substr(start, end - start);
+-    string_replace_all(substr, "\n", "↵");
++    string_replace_all(substr, "\n", "\\n");
+     output += "..." + substr + "...\n";
+     std::string spaces(pos - start + 3, ' ');
+     output += spaces + "^";
