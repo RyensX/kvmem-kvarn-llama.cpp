@@ -1750,6 +1750,7 @@ int main(int argc, char ** argv) {
 
     // No speculative rollback state is needed without MTP.
     if (!st.spec_mtp) st.kparams.mtp_state = 0;
+    if (st.kparams.enabled) kvmem_set_gdn_chunk_default();
     if (st.kparams.enabled) {
         if (!nvme_dir.empty()) {
             st.kparams.nvme_dir = nvme_dir.c_str();

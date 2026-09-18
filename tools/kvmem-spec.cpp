@@ -2,6 +2,7 @@
 #include "llama-kvmem-hooks.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -104,6 +105,17 @@ bool kvmem_cache_config(
     }
     kvarn = llama_kvarn_params_for_type(type);
     return true;
+}
+
+void kvmem_set_gdn_chunk_default() {
+    if (std::getenv("KVMEM_GDN_CHUNK_MIN_TOKENS")) {
+        return;
+    }
+#if defined(_WIN32)
+    _putenv_s("KVMEM_GDN_CHUNK_MIN_TOKENS", "64");
+#else
+    setenv("KVMEM_GDN_CHUNK_MIN_TOKENS", "64", 0);
+#endif
 }
 
 bool kvmem_spec_start(kvmem_spec_session & sess,

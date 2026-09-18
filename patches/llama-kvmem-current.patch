@@ -1626,10 +1626,51 @@ index 083f2db0dba46c348bd46a01a1bb42ba76ac154b..0323ea2d6bbb0dc95d0e591e9aea6135
          // Models that need specific instantiation should be handled in the
          // switch statement
 diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
-index ad66126477369412c0b77d13044be9fa909f906c..831d0a20d0404cb1de89f58b4247eef8fad60b7b 100644
+index ad66126477369412c0b77d13044be9fa909f906c..212128f288c9aca5818192c8a829038b2f5e1ad3 100644
 --- a/src/models/delta-net-base.cpp
 +++ b/src/models/delta-net-base.cpp
-@@ -460,6 +460,13 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
+@@ -3,6 +3,31 @@
+ #include "llama-impl.h"
+ #include "llama-memory-recurrent.h"
+ 
++#include <cerrno>
++#include <cstdlib>
++
++bool llm_gdn_use_fused_chunk(const llama_cparams & cparams, int64_t n_tokens) {
++    if (!cparams.fused_gdn_ch) {
++        return false;
++    }
++
++    // The fused CUDA op advances tokens serially. The existing chunk graph
++    // exposes the expensive work as matrix operations once a batch is large
++    // enough. Keep this tunable because the crossover depends on the GPU.
++    static const int64_t chunk_min_tokens = []() {
++        const char * value = std::getenv("KVMEM_GDN_CHUNK_MIN_TOKENS");
++        if (!value || !*value) {
++            return int64_t{0};
++        }
++        errno = 0;
++        char * end = nullptr;
++        const long long parsed = std::strtoll(value, &end, 10);
++        return errno == 0 && end != value && *end == '\0' && parsed >= 0 ?
++                static_cast<int64_t>(parsed) : int64_t{0};
++    }();
++    return chunk_min_tokens == 0 || n_tokens < chunk_min_tokens;
++}
++
+ // utility to get one slice from the third dimension
+ // input dim:  [x, y, c, b]
+ // output dim: [x, y, 1, b]
+@@ -439,7 +464,7 @@ std::pair<ggml_tensor *, ggml_tensor *> llm_build_delta_net_base::build_delta_ne
+         return build_delta_net_autoregressive(q, k, v, g, b, s, il);
+     }
+ 
+-    if (cparams.fused_gdn_ch) {
++    if (llm_gdn_use_fused_chunk(cparams, n_seq_tokens)) {
+         return build_delta_net_fused(q, k, v, g, b, s, il);
+     }
+ 
+@@ -460,6 +485,13 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
  
      const int64_t n_seqs = ubatch.n_seqs;
  
@@ -1643,7 +1684,7 @@ index ad66126477369412c0b77d13044be9fa909f906c..831d0a20d0404cb1de89f58b4247eef8
      ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
      cb(conv_states, "conv_states", il);
  
-@@ -476,7 +483,11 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
+@@ -476,7 +508,11 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
  
      const size_t row_size  = ggml_row_size(conv_states_all->type, row_count);
  
@@ -1656,7 +1697,7 @@ index ad66126477369412c0b77d13044be9fa909f906c..831d0a20d0404cb1de89f58b4247eef8
          const int64_t s_idx  = conv_input->ne[0] - conv_states->ne[0];
          const int64_t s_slot = 0;
  
-@@ -543,7 +554,7 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+@@ -543,7 +579,7 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
      const int64_t n_seqs       = s->ne[3];
      const int64_t n_seq_tokens = q->ne[2];
  
@@ -1665,7 +1706,7 @@ index ad66126477369412c0b77d13044be9fa909f906c..831d0a20d0404cb1de89f58b4247eef8
  
      if (!keep) {
          auto attn_out = build_delta_net(q, k, v, g, b, s, il);
-@@ -561,13 +572,23 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+@@ -561,13 +597,23 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
      }
  
      const int64_t D = S_v * S_v * H_v;
@@ -1692,7 +1733,7 @@ index ad66126477369412c0b77d13044be9fa909f906c..831d0a20d0404cb1de89f58b4247eef8
          res->add_fused_node({LLM_FUSED_OP_GDN_AR, gdn_out, il});
      }
  
-@@ -582,6 +603,8 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+@@ -582,6 +628,8 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
          0);
      cb(output, "attn_output", il);
  
@@ -1701,6 +1742,21 @@ index ad66126477369412c0b77d13044be9fa909f906c..831d0a20d0404cb1de89f58b4247eef8
      const size_t row_size = hparams.n_embd_s() * ggml_element_size(ssm_states_all);
  
      // op writes the last min(n_seq_tokens, K) snapshots; trailing slots are left unwritten
+diff --git a/src/models/models.h b/src/models/models.h
+index 7656ce88a1a7f769d05b4824e6882b9e67a38004..3e5b7d97f7031cd71fa2ed3f1964538a9437782b 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -10,6 +10,10 @@
+ 
+ class llama_memory_hybrid_idx_context;
+ 
++// Long prefill benefits from the matrix-based chunk graph, while decode and
++// short batches avoid its setup cost. A zero threshold keeps the fused path.
++bool llm_gdn_use_fused_chunk(const llama_cparams & cparams, int64_t n_tokens);
++
+ // ref: https://github.com/ggml-org/llama.cpp/pull/28068
+ static inline ggml_tensor * build_gdn_l2_norm(ggml_context * ctx, ggml_tensor * x, float eps) {
+     const float n = x->ne[0];
 diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
 index f4b2a2aebe0f8ce8df355314e5b0429111d25254..d75c2db19d506cc4f773a29ad8e803ed0ec74c19 100644
 --- a/src/models/qwen3.cpp
@@ -1730,7 +1786,7 @@ index f4b2a2aebe0f8ce8df355314e5b0429111d25254..d75c2db19d506cc4f773a29ad8e803ed
              cur = build_attn(inp_attn,
                      model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
-index a1e263500ee8681dfd8736c81ec7d3f5ae7ce911..3cec5ab28634bac519f7869ef804f74ba8b16244 100644
+index a1e263500ee8681dfd8736c81ec7d3f5ae7ce911..35c5e54ce7921d38da6bd4b731213db70ce073c9 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
 @@ -281,11 +281,14 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
@@ -1756,7 +1812,19 @@ index a1e263500ee8681dfd8736c81ec7d3f5ae7ce911..3cec5ab28634bac519f7869ef804f74b
  
      // Attention computation
      const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
-@@ -580,9 +584,11 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
+@@ -435,7 +439,10 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
+ 
+     // if head keys and value keys are different, repeat to force tensors into matching shapes
+     // note: need explicit repeat only if we are not using the fused GDN.
+-    if (num_k_heads != num_v_heads && (!cparams.fused_gdn_ar || !cparams.fused_gdn_ch)) {
++    const bool gdn_keeps_snapshots = cparams.n_rs_seq > 0 || inp->mctx->has_replay();
++    const bool use_fused_gdn = gdn_keeps_snapshots || (n_seq_tokens == 1 ?
++            cparams.fused_gdn_ar : llm_gdn_use_fused_chunk(cparams, n_seq_tokens));
++    if (num_k_heads != num_v_heads && !use_fused_gdn) {
+         GGML_ASSERT(num_v_heads % num_k_heads == 0);
+         q_conv = ggml_repeat_4d(ctx0, q_conv, head_k_dim, num_v_heads, n_seq_tokens, n_seqs);
+         k_conv = ggml_repeat_4d(ctx0, k_conv, head_k_dim, num_v_heads, n_seq_tokens, n_seqs);
+@@ -580,9 +587,11 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
      Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
      Kcur = build_norm(Kcur, layer.attn_k_norm, nullptr, LLM_NORM_RMS, il);
      cb(Kcur, "mtp_Kcur_normed", il);
@@ -1768,6 +1836,38 @@ index a1e263500ee8681dfd8736c81ec7d3f5ae7ce911..3cec5ab28634bac519f7869ef804f74b
  
      Qcur = ggml_rope_multi(ctx0, Qcur, inp_pos, nullptr,
              n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+diff --git a/src/models/qwen35moe.cpp b/src/models/qwen35moe.cpp
+index bdf772625093faffd2fdf3a8c525f0225c6859dc..3dc76b26312c137ac0103ec835e5fb36d1249347 100644
+--- a/src/models/qwen35moe.cpp
++++ b/src/models/qwen35moe.cpp
+@@ -459,7 +459,10 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn_linear(
+ 
+     // if head keys and value keys are different, repeat to force tensors into matching shapes
+     // note: need explicit repeat only if we are not using the fused GDN.
+-    if (num_k_heads != num_v_heads && (!cparams.fused_gdn_ar || !cparams.fused_gdn_ch)) {
++    const bool gdn_keeps_snapshots = cparams.n_rs_seq > 0 || inp->mctx->has_replay();
++    const bool use_fused_gdn = gdn_keeps_snapshots || (n_seq_tokens == 1 ?
++            cparams.fused_gdn_ar : llm_gdn_use_fused_chunk(cparams, n_seq_tokens));
++    if (num_k_heads != num_v_heads && !use_fused_gdn) {
+         GGML_ASSERT(num_v_heads % num_k_heads == 0);
+         q_conv = ggml_repeat_4d(ctx0, q_conv, head_k_dim, num_v_heads, n_seq_tokens, n_seqs);
+         k_conv = ggml_repeat_4d(ctx0, k_conv, head_k_dim, num_v_heads, n_seq_tokens, n_seqs);
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+index b20eb6c272a0c1b4bdbd0812385b4ffe91a96230..20a9924d3f6e6a9a50f2c88a0d573f59c128c596 100644
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -1081,7 +1081,10 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
+     k_conv = build_gdn_l2_norm(ctx0, k_conv, eps_norm);
+ 
+     // repeat to match shapes when head keys != value keys; unneeded with the fused GDN
+-    if (num_k_heads != num_v_heads && (!cparams.fused_gdn_ar || !cparams.fused_gdn_ch)) {
++    const bool gdn_keeps_snapshots = cparams.n_rs_seq > 0 || inp->mctx->has_replay();
++    const bool use_fused_gdn = gdn_keeps_snapshots || (n_seq_tokens == 1 ?
++            cparams.fused_gdn_ar : llm_gdn_use_fused_chunk(cparams, n_seq_tokens));
++    if (num_k_heads != num_v_heads && !use_fused_gdn) {
+         GGML_ASSERT(num_v_heads % num_k_heads == 0);
+         q_conv = ggml_repeat_4d(ctx0, q_conv, head_k_dim, num_v_heads, n_seq_tokens, n_seqs);
+         k_conv = ggml_repeat_4d(ctx0, k_conv, head_k_dim, num_v_heads, n_seq_tokens, n_seqs);
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 index e3db6816757b194225b5ca058f6d29dfb86aaa34..84b9299279b01cc97ce50f5e1240a6890d1238af 100644
 --- a/tests/test-backend-ops.cpp

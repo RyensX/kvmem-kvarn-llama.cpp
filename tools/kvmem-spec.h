@@ -41,6 +41,9 @@ bool kvmem_cache_config(
         ggml_type type_k, ggml_type type_v,
         int32_t kvarn_bits_k, int32_t kvarn_bits_v,
         llama_kvarn_params & kvarn);
+// Enable the long-prefill route for KVMem tools without changing ordinary
+// runtime users. An explicit environment value always wins.
+void kvmem_set_gdn_chunk_default();
 
 struct kvmem_spec_session {
     common_params spec_params;

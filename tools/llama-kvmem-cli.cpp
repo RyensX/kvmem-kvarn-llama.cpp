@@ -295,6 +295,7 @@ int main(int argc, char ** argv) {
     }
 
     if (kparams.enabled) {
+        kvmem_set_gdn_chunk_default();
         if (!nvme_dir.empty()) {
             kparams.nvme_dir = nvme_dir.c_str();
         }
