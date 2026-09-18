@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -513,12 +515,81 @@ static void check_gdn_transactions(llama_model * model, ggml_type type, int draf
     std::printf("PASS GDN type=%s mtp=%d: zero/partial/full commit, all-layer states, restore, duplicate commit\n", ggml_type_name(type), drafts);
 }
 
+// 长批次走 chunk 前缀，短批次走 fused；比较输出及每个保留的回滚状态。
+static std::vector<float> run_chunk_prefill(llama_model * model, bool replay, int ubatch) {
+    llama_kvmem_params kp{};
+    kp.enabled = true;
+    kp.block_tokens = 32;
+    kp.budget = 256;
+    kp.gen_reserve = 128;
+    kp.query_begin = kp.query_end = kp.force_pos = -1;
+    kp.mtp_state = replay ? 2 : 0;
+    llama_kvmem_set_params(&kp);
+    auto cp = llama_context_default_params();
+    cp.n_ctx = 512;
+    cp.n_batch = 256;
+    cp.n_ubatch = ubatch;
+    cp.n_seq_max = 1;
+    cp.n_rs_seq = 2;
+    cp.type_k = cp.type_v = GGML_TYPE_F16;
+    cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    std::unique_ptr<llama_context, decltype(&llama_free)> ctx(llama_init_from_model(model, cp), llama_free);
+    require(bool(ctx), "chunk prefill context init failed");
+    auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get()));
+    require(hybrid != nullptr, "chunk prefill requires a hybrid model");
+    auto * mem = hybrid->get_mem_recr();
+    auto tokens = common_tokenize(llama_model_get_vocab(model),
+        "Remember 7391. Check every retained recurrent state after a long prefill. ", true, true);
+    const auto seed = tokens;
+    while (tokens.size() < 192) tokens.insert(tokens.end(), seed.begin(), seed.end());
+    tokens.resize(192);
+    auto batch = llama_batch_get_one(tokens.data(), tokens.size());
+    require(llama_decode(ctx.get(), batch) == 0, "chunk prefill decode failed");
+    llama_synchronize(ctx.get());
+    const float * logits = llama_get_logits_ith(ctx.get(), -1);
+    require(logits != nullptr, "chunk prefill logits missing");
+    std::vector<float> result(logits, logits + llama_vocab_n_tokens(llama_model_get_vocab(model)));
+    for (auto * t : mem->s_l) {
+        if (!t) continue;
+        require(t->type == GGML_TYPE_F32, "unexpected recurrent state type");
+        for (uint32_t group = 0; group <= mem->n_rs_seq; ++group) {
+            const size_t offset = (group * mem->size + mem->head) * t->nb[1];
+            const size_t count = t->ne[0];
+            const size_t begin = result.size();
+            result.resize(begin + count);
+            ggml_backend_tensor_get(t, result.data() + begin, offset, count * sizeof(float));
+        }
+    }
+    return result;
+}
+
+static void check_chunk_prefill(llama_model * model) {
+    for (bool replay : {false, true}) {
+        const auto baseline = run_chunk_prefill(model, replay, 32);
+        const auto chunked = run_chunk_prefill(model, replay, 256);
+        require(baseline.size() == chunked.size(), "chunk prefill result dimensions differ");
+        double squared = 0, scale = 0, maximum = 0;
+        for (size_t i = 0; i < baseline.size(); ++i) {
+            require(std::isfinite(baseline[i]) && std::isfinite(chunked[i]), "nonfinite chunk prefill result");
+            const double delta = baseline[i] - chunked[i];
+            squared += delta * delta;
+            scale += double(baseline[i]) * baseline[i];
+            maximum = std::max(maximum, std::abs(delta));
+        }
+        const double relative = std::sqrt(squared / std::max(scale, 1e-20));
+        std::printf("CHUNK_PREFILL replay=%d relative=%.9f maxabs=%.9f\n", replay, relative, maximum);
+        require(relative < .001 && maximum < .05, "chunk prefill output/state tolerance exceeded");
+    }
+}
+
 int main(int argc, char ** argv) {
-    if (argc != 2) {
-        std::fprintf(stderr, "Usage: %s model-mtp.gguf (requires CUDA)\n", argv[0]);
+    const bool chunk_prefill = argc == 3 && std::strcmp(argv[2], "--chunk-prefill") == 0;
+    if (argc != 2 && !chunk_prefill) {
+        std::fprintf(stderr, "Usage: %s model-mtp.gguf [--chunk-prefill] (requires CUDA)\n", argv[0]);
         return argc == 1 ? 77 : 1;
     }
     try {
+        if (chunk_prefill) setenv("KVMEM_GDN_CHUNK_MIN_TOKENS", "64", 1);
         llama_backend_init();
         ggml_backend_load_all();
         auto mp = llama_model_default_params();
@@ -527,6 +598,13 @@ int main(int argc, char ** argv) {
         std::unique_ptr<llama_model, decltype(&llama_model_free)> model(
                 llama_model_load_from_file(argv[1], mp), llama_model_free);
         require(bool(model), "model load failed");
+        if (chunk_prefill) {
+            check_chunk_prefill(model.get());
+            llama_kvmem_set_params(nullptr);
+            model.reset();
+            llama_backend_free();
+            return 0;
+        }
         check_batch_inputs(model.get());
 
         llama_kvmem_params kp{};

@@ -1634,7 +1634,7 @@ index 083f2db0dba46c348bd46a01a1bb42ba76ac154b..0323ea2d6bbb0dc95d0e591e9aea6135
          // Models that need specific instantiation should be handled in the
          // switch statement
 diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
-index ad66126477369412c0b77d13044be9fa909f906c..212128f288c9aca5818192c8a829038b2f5e1ad3 100644
+index ad66126477369412c0b77d13044be9fa909f906c..fcbff82acf6d1646b45a55cf05aa1f5f1dc52409 100644
 --- a/src/models/delta-net-base.cpp
 +++ b/src/models/delta-net-base.cpp
 @@ -3,6 +3,31 @@
@@ -1705,21 +1705,54 @@ index ad66126477369412c0b77d13044be9fa909f906c..212128f288c9aca5818192c8a829038b
          const int64_t s_idx  = conv_input->ne[0] - conv_states->ne[0];
          const int64_t s_slot = 0;
  
-@@ -543,7 +579,7 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+@@ -541,9 +577,9 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+     const int64_t S_v          = s->ne[0];
+     const int64_t H_v          = s->ne[2];
      const int64_t n_seqs       = s->ne[3];
-     const int64_t n_seq_tokens = q->ne[2];
+-    const int64_t n_seq_tokens = q->ne[2];
++    int64_t n_seq_tokens = q->ne[2];
  
 -    const bool keep = cparams.n_rs_seq > 0;
 +    const bool keep = cparams.n_rs_seq > 0 || mctx_cur->has_replay();
  
      if (!keep) {
          auto attn_out = build_delta_net(q, k, v, g, b, s, il);
-@@ -561,13 +597,23 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+@@ -561,13 +597,53 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
      }
  
      const int64_t D = S_v * S_v * H_v;
 -    const int64_t K = cparams.n_rs_seq + 1;
 +    const int64_t K = mctx_cur->has_replay() ? (mctx_cur->is_recording() ? 0 : 1) : cparams.n_rs_seq + 1;
++
++    ggml_tensor * prefix_output = nullptr;
++    const int64_t prefix_tokens = n_seq_tokens - K;
++    // 仅末尾 K 个 token 需要回滚快照；录制验证输入时仍保留完整 fused 路径。
++    if (!mctx_cur->is_recording() && K > 0 && g->ne[0] == 1 &&
++            prefix_tokens > 1 && !llm_gdn_use_fused_chunk(cparams, prefix_tokens)) {
++        auto slice = [&](ggml_tensor * t, int64_t begin, int64_t count) {
++            return ggml_cont(ctx0, ggml_view_4d(ctx0, t,
++                t->ne[0], t->ne[1], count, t->ne[3],
++                t->nb[1], t->nb[2], t->nb[3], begin * t->nb[2]));
++        };
++        auto * prefix_q = slice(q, 0, prefix_tokens);
++        auto * prefix_k = slice(k, 0, prefix_tokens);
++        // chunk 图需要展开 GQA 头，末尾 fused 算子继续使用原始头布局。
++        if (prefix_q->ne[1] != H_v) {
++            prefix_q = ggml_repeat_4d(ctx0, prefix_q, prefix_q->ne[0], H_v, prefix_tokens, n_seqs);
++            prefix_k = ggml_repeat_4d(ctx0, prefix_k, prefix_k->ne[0], H_v, prefix_tokens, n_seqs);
++        }
++        auto prefix = build_delta_net_chunking(prefix_q, prefix_k,
++            slice(v, 0, prefix_tokens), slice(g, 0, prefix_tokens),
++            slice(b, 0, prefix_tokens), s, il);
++        prefix_output = prefix.first;
++        s = prefix.second;
++        q = slice(q, prefix_tokens, K);
++        k = slice(k, prefix_tokens, K);
++        v = slice(v, prefix_tokens, K);
++        g = slice(g, prefix_tokens, K);
++        b = slice(b, prefix_tokens, K);
++        n_seq_tokens = K;
++    }
 +
 +    if (mctx_cur->is_recording()) {
 +        ggml_tensor * inputs[] = {k, v, g, b};
@@ -1741,7 +1774,7 @@ index ad66126477369412c0b77d13044be9fa909f906c..212128f288c9aca5818192c8a829038b
          res->add_fused_node({LLM_FUSED_OP_GDN_AR, gdn_out, il});
      }
  
-@@ -582,6 +628,8 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+@@ -582,6 +658,8 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
          0);
      cb(output, "attn_output", il);
  
@@ -1750,6 +1783,13 @@ index ad66126477369412c0b77d13044be9fa909f906c..212128f288c9aca5818192c8a829038b
      const size_t row_size = hparams.n_embd_s() * ggml_element_size(ssm_states_all);
  
      // op writes the last min(n_seq_tokens, K) snapshots; trailing slots are left unwritten
+@@ -602,5 +680,5 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+ 
+     ggml_build_forward_expand(gf, ggml_cpy(ctx0, src, dst));
+ 
+-    return output;
++    return prefix_output ? ggml_concat(ctx0, prefix_output, output, 2) : output;
+ }
 diff --git a/src/models/models.h b/src/models/models.h
 index 7656ce88a1a7f769d05b4824e6882b9e67a38004..3e5b7d97f7031cd71fa2ed3f1964538a9437782b 100644
 --- a/src/models/models.h
