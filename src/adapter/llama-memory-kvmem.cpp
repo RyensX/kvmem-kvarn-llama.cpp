@@ -1062,6 +1062,7 @@ llama_pos llama_memory_kvmem::model_pos(uint32_t logical) const {
 bool llama_memory_kvmem::remove_logical(llama_context * ctx, llama_pos begin, llama_pos end) {
     ++attention_epoch_;
     if (mtp_ && llama_get_memory(ctx) == mtp_) return mtp_->remove_logical(begin, end);
+    if (kvarn_ && !kvarn_->can_seq_rm_logical(0, begin, end)) return false;
     // Recurrent rollback is only valid across consecutive text positions.
     if (recr_ && end < 0 && begin > 0 && (size_t) begin < row_positions_.size()) {
         const auto p = model_pos(begin);
@@ -1071,7 +1072,7 @@ bool llama_memory_kvmem::remove_logical(llama_context * ctx, llama_pos begin, ll
             if (!recr_->seq_rm(0, p, -1)) return false;
         }
     }
-    return kv_->seq_rm_logical(0, begin, end);
+    return kvarn_ ? kvarn_->seq_rm_logical(0, begin, end) : kv_->seq_rm_logical(0, begin, end);
 }
 
 bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {

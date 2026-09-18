@@ -959,7 +959,7 @@ index 32cafe4eeeaa94d55e374a1b6b1bb54d69f58eb7..e7bf6f2f6d368694980c0a5481ef4fc7
      // common
      //
 diff --git a/src/llama-kv-cache-kvarn.cpp b/src/llama-kv-cache-kvarn.cpp
-index 835f8881464d020400cd8c92443d31517be22b2a..5816a725be6b371ca19f8545d678346f70bc4be8 100644
+index 835f8881464d020400cd8c92443d31517be22b2a..ed2f571d7fbc2861342ed8ef50dba562fc2b5d68 100644
 --- a/src/llama-kv-cache-kvarn.cpp
 +++ b/src/llama-kv-cache-kvarn.cpp
 @@ -12,6 +12,7 @@
@@ -1049,7 +1049,40 @@ index 835f8881464d020400cd8c92443d31517be22b2a..5816a725be6b371ca19f8545d678346f
  }
  
  llama_memory_context_ptr llama_kv_cache_kvarn::init_update(llama_context * lctx, bool optimize) {
-@@ -3013,6 +3036,21 @@ uint32_t llama_kv_cache_kvarn::native_rotated_max_query_tokens(int32_t il) const
+@@ -1959,6 +1982,32 @@ bool llama_kv_cache_kvarn::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p
+     return metadata->seq_rm(seq_id, p0, p1);
+ }
+ 
++bool llama_kv_cache_kvarn::can_seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
++    if (seq_id < 0 || uint32_t(seq_id) >= n_seq_max) return false;
++    const auto & cells = metadata->get_cells(seq_id);
++    llama_pos logical_max = -1;
++    llama_pos model_begin = std::numeric_limits<llama_pos>::max();
++    const llama_pos begin = std::max<llama_pos>(0, p0);
++    const llama_pos end = p1 < 0 ? std::numeric_limits<llama_pos>::max() : p1;
++    for (uint32_t i = 0; i < cells.size(); ++i) {
++        if (cells.is_empty(i) || !cells.seq_has(i, seq_id)) continue;
++        const auto logical = cells.ext_get(i).logical_pos;
++        const auto row = logical >= 0 ? logical : cells.pos_get(i);
++        logical_max = std::max(logical_max, row);
++        if (row >= begin && row < end) model_begin = std::min(model_begin, cells.pos_get(i));
++    }
++    if (model_begin == std::numeric_limits<llama_pos>::max()) return true;
++    // 先检查逻辑后缀的压缩组边界，再检查可选精确尾缓存的回滚容量。
++    return llama_kvarn_can_remove_range(logical_max, begin, p1, KVAR_N_GROUP) &&
++        metadata->can_seq_rm(seq_id, begin == 0 ? 0 : model_begin, -1);
++}
++
++bool llama_kv_cache_kvarn::seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
++    if (!can_seq_rm_logical(seq_id, p0, p1)) return false;
++    apply_pending_stream_copies(nullptr);
++    return metadata->seq_rm_logical(seq_id, p0, p1);
++}
++
+ bool llama_kv_cache_kvarn::seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) {
+     apply_pending_stream_copies(nullptr);
+     if (swa) {
+@@ -3013,6 +3062,21 @@ uint32_t llama_kv_cache_kvarn::native_rotated_max_query_tokens(int32_t il) const
      return layer_for(il).native_rotated_max_query_tokens;
  }
  
@@ -1072,7 +1105,7 @@ index 835f8881464d020400cd8c92443d31517be22b2a..5816a725be6b371ca19f8545d678346f
          ggml_context * ctx, int32_t il, bool value) const {
      const auto & layer = layer_for(il);
 diff --git a/src/llama-kv-cache-kvarn.h b/src/llama-kv-cache-kvarn.h
-index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..ce763ac9bb32aa4fd2b7ddfb78e44fbe555a1b13 100644
+index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..4a8f299e7a90168f97ef94dc306c876ac564ba96 100644
 --- a/src/llama-kv-cache-kvarn.h
 +++ b/src/llama-kv-cache-kvarn.h
 @@ -89,7 +89,8 @@ public:
@@ -1093,7 +1126,12 @@ index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..ce763ac9bb32aa4fd2b7ddfb78e44fbe
      mutable std::vector<int64_t> compact_read_plan_cache;
      llama_context * update_lctx;
  
-@@ -287,6 +289,7 @@ public:
+@@ -284,9 +286,12 @@ public:
+             llama_kv_cache::slot_info_vec_t * sinfos_out,
+             const llama_kv_cache::slot_info_vec_t * sinfos_in);
+ 
++    bool can_seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
++    bool seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
      llama_kv_cache * get_metadata_cache() const;
      ggml_tensor * get_materialization_source(int32_t il, bool value) const;
      std::unique_ptr<llama_kv_cache> make_shared_metadata_cache(const llama_model & model_view) const;
@@ -1101,7 +1139,7 @@ index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..ce763ac9bb32aa4fd2b7ddfb78e44fbe
      int32_t mapped_layer_id(int32_t il) const;
      llama_kv_tail_route get_tail_route(int32_t il) const;
      bool get_tail_explicit_bias(int32_t il) const;
-@@ -300,6 +303,12 @@ public:
+@@ -300,6 +305,12 @@ public:
      bool mixed_tail_native_preferred(int32_t il) const;
      bool native_attention_uses_original_v(int32_t il) const;
      uint32_t native_rotated_max_query_tokens(int32_t il) const;
@@ -1114,7 +1152,7 @@ index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..ce763ac9bb32aa4fd2b7ddfb78e44fbe
  
      // Reference-faithful staging keeps one incomplete 128-token group lossless.
      // Completed records are committed eagerly, so physical ubatch size does not
-@@ -378,6 +387,9 @@ private:
+@@ -378,6 +389,9 @@ private:
      const uint32_t n_stream;
      const uint32_t n_seq_max;
      const uint32_t kv_size;
@@ -1125,14 +1163,15 @@ index ffe8e567c04d7aa62acb63cf6ff9cd55f7513615..ce763ac9bb32aa4fd2b7ddfb78e44fbe
      // tail_groups must be declared first (C++ initializes members in order).
      const uint32_t tail_groups;   // non-SWA scheduler span; SWA fixed local tail
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index c9fd575e346ce3ae5852122c66a5dd3d30c80302..7a4098e306c1389d816afed57e727f31b3ac035c 100644
+index c9fd575e346ce3ae5852122c66a5dd3d30c80302..5db60cacb8ec43323bbc31ac6944107cfde9e743 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -1448,6 +1448,31 @@ bool llama_kv_cache::seq_rm_plan(
+@@ -1448,6 +1448,51 @@ bool llama_kv_cache::seq_rm_plan(
      return true;
  }
  
 +bool llama_kv_cache::seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
++    materialize_pending_copies();
 +    p0 = std::max<llama_pos>(p0, 0);
 +    p1 = p1 < 0 ? std::numeric_limits<llama_pos>::max() : p1;
 +    for (uint32_t s = 0; s < n_stream; ++s) {
@@ -1146,6 +1185,13 @@ index c9fd575e346ce3ae5852122c66a5dd3d30c80302..7a4098e306c1389d816afed57e727f31
 +            if (p < p0 || p >= p1 || (seq_id >= 0 && !cells.seq_has(i, seq_id))) {
 +                continue;
 +            }
++            if (tail) {
++                for (llama_seq_id id = 0; uint32_t(id) < n_seq_max; ++id) {
++                    if ((seq_id < 0 || id == seq_id) && cells.seq_has(i, id)) {
++                        tail->seq_rm_cell(id, s, i);
++                    }
++                }
++            }
 +            if (seq_id < 0) {
 +                cells.rm(i);
 +            } else {
@@ -1154,13 +1200,25 @@ index c9fd575e346ce3ae5852122c66a5dd3d30c80302..7a4098e306c1389d816afed57e727f31
 +            v_heads[s] = std::min(v_heads[s], i);
 +        }
 +    }
++    // 逻辑删除也必须重建结构化游标，否则拒绝草稿后会跳过已释放的 cell。
++    for (llama_seq_id id = 0; uint32_t(id) < n_seq_max; ++id) {
++        if (seq_id >= 0 && id != seq_id) continue;
++        rebuild_allocation_head(id);
++        if (tail) {
++            const auto available = v_cells[seq_to_stream[id]].seq_size(id);
++            const auto coverage = tail->coverage(id, available);
++            if (coverage.exact < coverage.requested) {
++                tail->mark_degraded(id, LLAMA_KV_TAIL_DEGRADED_HISTORICAL_OP);
++            }
++        }
++    }
 +    return true;
 +}
 +
  bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
      if (other) {
          return true;
-@@ -2888,8 +2913,9 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
+@@ -2888,8 +2933,9 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
  
              cells.pos_set(idx, ubatch.pos[i]);
  
@@ -1171,7 +1229,7 @@ index c9fd575e346ce3ae5852122c66a5dd3d30c80302..7a4098e306c1389d816afed57e727f31
  
                  if (ubatch.is_pos_2d()) {
                      ext.x = ubatch.pos[i + ubatch.n_tokens*2];
-@@ -2936,25 +2962,32 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
+@@ -2936,25 +2982,32 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
          }
      }
  
@@ -1219,7 +1277,7 @@ index c9fd575e346ce3ae5852122c66a5dd3d30c80302..7a4098e306c1389d816afed57e727f31
          }
      }
  
-@@ -3052,6 +3085,12 @@ ggml_tensor * llama_kv_cache::get_k_storage(int32_t il) const {
+@@ -3052,6 +3105,12 @@ ggml_tensor * llama_kv_cache::get_k_storage(int32_t il) const {
      return layers[ikv].k;
  }
  
@@ -1232,7 +1290,7 @@ index c9fd575e346ce3ae5852122c66a5dd3d30c80302..7a4098e306c1389d816afed57e727f31
  const llama_kv_cells & llama_kv_cache::get_cells(llama_seq_id seq_id) const {
      GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
  
-@@ -3772,7 +3811,16 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
+@@ -3772,7 +3831,16 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
  
              auto & idxs = seq_idxs[seq_id];
  
@@ -1250,7 +1308,7 @@ index c9fd575e346ce3ae5852122c66a5dd3d30c80302..7a4098e306c1389d816afed57e727f31
                  if (seq_srct.find(seq_id) != seq_srct.end()) {
                      const uint32_t srct = seq_srct[seq_id];
  
-@@ -3866,6 +3914,26 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
+@@ -3866,6 +3934,26 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
  skip:
                  data[idst + j] = mask_drop;
              }

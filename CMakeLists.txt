@@ -88,6 +88,11 @@ if (KVMEM_BUILD_LLAMA)
     target_link_libraries(kvmem-chat-id-test PRIVATE llama-common)
     add_test(NAME kvmem-chat-id-test COMMAND kvmem-chat-id-test)
 
+    add_executable(kvmem-kvarn-logical-rollback-test tests/kvarn-logical-rollback-test.cpp)
+    target_include_directories(kvmem-kvarn-logical-rollback-test PRIVATE llama.cpp/src)
+    target_link_libraries(kvmem-kvarn-logical-rollback-test PRIVATE llama)
+    add_test(NAME kvmem-kvarn-logical-rollback-test COMMAND kvmem-kvarn-logical-rollback-test)
+
     add_executable(kvmem-cache-type-test tests/cache-type-test.cpp tools/kvmem-spec.cpp)
     target_include_directories(kvmem-cache-type-test PRIVATE src/adapter tools llama.cpp/src)
     target_link_libraries(kvmem-cache-type-test PRIVATE llama llama-common kvmem)
