@@ -244,8 +244,33 @@ static void test_selection_preview_and_resident_commit() {
     CHECK(rt.commit_resident_selection(selected));
 }
 
+static void test_stage_in_can_pin_a_block_to_its_physical_slot() {
+    struct BlockSlotBackend : RecordingBackend {
+        std::vector<uint32_t> requested_blocks;
+
+        int32_t alloc_gpu_slot_for_block(uint32_t block_id) override {
+            requested_blocks.push_back(block_id);
+            return static_cast<int32_t>(block_id);
+        }
+    } be;
+
+    KvMemRuntime rt(make_cfg(), &be);
+    rt.register_append(32 * 4);
+    for (uint32_t id = 0; id < 4; ++id) {
+        rt.store().set_block_tier(id, KvTier::CPU);
+        rt.store().set_block_gpu_slot(id, -1);
+    }
+
+    const auto plan = rt.prepare_selection({ 2 });
+    CHECK(plan.stage_in.size() == 1 && plan.stage_in[0] == 2);
+    rt.finish_reselect();
+    CHECK(be.requested_blocks == std::vector<uint32_t>({ 2 }));
+    CHECK(rt.store().blocks()[2].gpu_slot == 2);
+}
+
 int main() {
     test_selection_preview_and_resident_commit();
+    test_stage_in_can_pin_a_block_to_its_physical_slot();
     test_stage_out_before_stage_in();
     test_high_overlap_skips_stage_in();
     test_pressure_keeps_sink_and_tail();
