@@ -569,6 +569,17 @@ static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_toke
     bool warm_skip = do_retr && reused && suffix_cont && same_query && past_query &&
             gdn_at_tip && kv_at_tip && free_slots >= need_slots;
 
+    // 驻留缓存不能把旧查询再次分配到新 cell；需要重新捕获 Q 时从头计算。
+    if (llama_kvmem_uses_kvarn_resident_store() && reused && do_retr && n_past > q0 &&
+            !warm_skip && !(suffix_cont && same_query && past_query)) {
+        reused = false;
+    }
+    if (reused) {
+        auto * target = llama_get_memory(ctx);
+        auto * draft = st.spec.ctx_dft ? llama_get_memory(st.spec.ctx_dft) : nullptr;
+        if ((target && !llama_memory_can_seq_rm(target, 0, n_past, -1)) ||
+                (draft && !llama_memory_can_seq_rm(draft, 0, n_past, -1))) reused = false;
+    }
     if (reused) {
         if (st.kparams.enabled) {
             if (past_query && same_query) {
@@ -582,20 +593,20 @@ static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_toke
         }
         llama_memory_t mem = llama_get_memory(ctx);
         if (mem) {
-            llama_memory_seq_rm(mem, 0, n_past, -1);
+            if (!llama_memory_seq_rm(mem, 0, n_past, -1)) reused = false;
         }
         if (st.spec.ctx_dft) {
             llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
             if (md) {
-                llama_memory_seq_rm(md, 0, n_past, -1);
+                if (!llama_memory_seq_rm(md, 0, n_past, -1)) reused = false;
             }
         }
-        if (st.kparams.enabled) {
+        if (reused && st.kparams.enabled) {
             llama_kvmem_truncate_cached((uint32_t) n_past);
         }
         // Continuation already has GDN at n_past. Catch-up from query would
         // llama_decode at q0 while seq_pos_max is n_past-1 (M-RoPE X < Y).
-        if (!warm_skip && !gdn_sync_to(st, prompt, n_past, io)) {
+        if (reused && !warm_skip && !gdn_sync_to(st, prompt, n_past, io)) {
             if (io && io->aborted) {
                 return false;
             }
@@ -692,6 +703,23 @@ static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_toke
             st.last_query_end = -1;
             st.last_user_text.clear();
         }
+    };
+
+    auto rebuild_prefill = [&]() {
+        fprintf(stderr, "KVMEM_TRACE query_replay_fallback rebuild=1 query=[%d,%d)\n", q0, q1);
+        memory_clear_all(st);
+        if (n_cache_hit) *n_cache_hit = 0;
+        llama_kvmem_reset_query();
+        if (!dec(0, eval_end, "prefill-rebuild")) {
+            commit_last_query(false);
+            return false;
+        }
+        llama_kvmem_apply_retrieval(ctx);
+        llama_kvmem_pin_working_set();
+        note_prefill();
+        commit_last_query(true);
+        persist_gdn_ckpt_gen_start(st, eval_end);
+        return true;
     };
 
     if (warm_skip) {
@@ -818,6 +846,14 @@ static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_toke
                     "(sink+suffix exceeds GPU budget)\n",
                     q0, q1, eval_end);
         } else {
+            auto * target = llama_get_memory(ctx);
+            auto * draft = st.spec.ctx_dft && !past_query ? llama_get_memory(st.spec.ctx_dft) : nullptr;
+            // 在恢复循环状态或删除任一缓存前完成能力检查。
+            if ((target && !llama_memory_can_seq_rm(target, 0, q0, q1)) ||
+                    (draft && (!llama_memory_can_seq_rm(draft, 0, q0, q1) ||
+                               !llama_memory_can_seq_rm(draft, 0, q0, -1)))) {
+                return rebuild_prefill();
+            }
             if (recr_ckpt && !gdn_ckpt.empty()) {
                 const llama_state_seq_flags fl = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
                 if (llama_state_seq_set_data_ext(ctx, gdn_ckpt.data(), gdn_ckpt.size(), 0, fl) != gdn_ckpt.size()) {
@@ -831,7 +867,7 @@ static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_toke
                 fprintf(stderr, "KVMEM_TRACE before_seq_rm seq_pos=[%d,%d] query=[%d,%d)\n",
                         llama_memory_seq_pos_min(mem, 0), llama_memory_seq_pos_max(mem, 0),
                         q0, q1);
-                llama_memory_seq_rm(mem, 0, q0, q1);
+                if (!llama_memory_seq_rm(mem, 0, q0, q1)) return rebuild_prefill();
                 fprintf(stderr, "KVMEM_TRACE after_seq_rm seq_pos=[%d,%d] auto_pos0=%d\n",
                         llama_memory_seq_pos_min(mem, 0), llama_memory_seq_pos_max(mem, 0),
                         llama_memory_seq_pos_max(mem, 0) + 1);
@@ -839,7 +875,7 @@ static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_toke
             if (st.spec.ctx_dft && !past_query) {
                 llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
                 if (md) {
-                    llama_memory_seq_rm(md, 0, q0, q1);
+                    if (!llama_memory_seq_rm(md, 0, q0, q1)) return rebuild_prefill();
                     fprintf(stderr, "KVMEM_TRACE mtp_after_seq_rm seq_pos=[%d,%d]\n",
                             llama_memory_seq_pos_min(md, 0), llama_memory_seq_pos_max(md, 0));
                 }
@@ -856,7 +892,7 @@ static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_toke
                 // and append in order up to q1. Continuation keeps draft suffix.
                 llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
                 if (md) {
-                    llama_memory_seq_rm(md, 0, q0, -1);
+                    if (!llama_memory_seq_rm(md, 0, q0, -1)) return rebuild_prefill();
                 }
                 if (q1 > q0) {
                     const int rc = decode_span(st.spec.ctx_dft, prompt.data(), q0, q1, st.n_batch,

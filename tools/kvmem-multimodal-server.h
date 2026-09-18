@@ -79,10 +79,19 @@ static void multimodal_remember(ServerState & st, MultimodalCheckpoint checkpoin
     }
 }
 
+struct multimodal_rebuild_required : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 static void multimodal_restore(ServerState & st, const MultimodalCheckpoint & checkpoint, bool truncate) {
     kvmem_scoped_ms timer(st.mm_perf.restore_ms);
     const bool live = st.mm_live_checkpoint == checkpoint.data && st.mm_live_row == checkpoint.row;
     if (!checkpoint.data) throw std::runtime_error("missing multimodal checkpoint data");
+    // 两个缓存都必须先通过预检，不能先恢复 GDN 再发现 KV 无法回滚。
+    if (!llama_kvmem_can_restore_logical(st.ctx, checkpoint.row) ||
+            (st.spec.ctx_dft && !llama_kvmem_can_restore_logical(st.spec.ctx_dft, checkpoint.row))) {
+        throw multimodal_rebuild_required("checkpoint exceeds KV rollback window");
+    }
     if (live) ++st.mm_perf.restore_skips;
     else ++st.mm_perf.restores;
     llama_synchronize(st.ctx);
@@ -95,10 +104,10 @@ static void multimodal_restore(ServerState & st, const MultimodalCheckpoint & ch
         throw std::runtime_error("multimodal recurrent restore failed");
     }
     if (!llama_kvmem_remove_logical(st.ctx, checkpoint.row, -1)) {
-        throw std::runtime_error("cannot remove uncommitted target rows");
+        throw multimodal_rebuild_required("cannot remove uncommitted target rows");
     }
     if (st.spec.ctx_dft && !llama_kvmem_remove_logical(st.spec.ctx_dft, checkpoint.row, -1)) {
-        throw std::runtime_error("cannot remove uncommitted MTP rows");
+        throw multimodal_rebuild_required("cannot remove uncommitted MTP rows");
     }
     if (st.spec.ok && !live) {
         kvmem_scoped_ms carry_timer(st.mm_perf.carry_ms);
@@ -131,6 +140,9 @@ static void multimodal_finish_request(ServerState & st) {
     } catch (const std::exception & e) {
         st.mm_error = e.what();
         fprintf(stderr, "KVMEM_TRACE multimodal_rollback_failed error=%s\n", e.what());
+        // 回滚失败不能留下循环状态与 KV 来自不同时间点的缓存。
+        memory_clear_all(st);
+        st.mm_committed = true;
     }
     st.mm_rollback.reset();
     st.mm_rollback_prompt.reset();
@@ -218,7 +230,7 @@ static int multimodal_decode_span(ServerState & st, int begin, int end, bool rep
     return 0;
 }
 
-static bool run_prefill_multimodal(ServerState & st, StreamIo * io, int * n_cache_hit) {
+static bool run_prefill_multimodal(ServerState & st, StreamIo * io, int * n_cache_hit, bool allow_replay = true) {
     const auto started = std::chrono::steady_clock::now();
     st.mm_perf = {};
     const auto copies_before = llama_kvmem_get_transfer_stats();
@@ -384,6 +396,12 @@ static bool run_prefill_multimodal(ServerState & st, StreamIo * io, int * n_cach
                     }
                 }
             }
+            if (replay && !allow_replay) {
+                // 已从空缓存完整计算；保留本次状态和新召回集合，不再尝试旧检查点。
+                path = "prefill_rebuild";
+                reason = "kv_rollback_unavailable";
+                replay = false;
+            }
             if (replay) {
                 multimodal_restore(st, query_checkpoint, false);
                 llama_kvmem_set_replay(true);
@@ -462,6 +480,18 @@ static bool run_prefill_multimodal(ServerState & st, StreamIo * io, int * n_cach
                     (unsigned long long) (copies.calls[2] - copies_before.calls[2]));
         }
         return true;
+    } catch (const multimodal_rebuild_required & e) {
+        fprintf(stderr, "KVMEM_TRACE multimodal_rebuild reason=%s retry=%d\n", e.what(), allow_replay);
+        memory_clear_all(st);
+        st.mm_rollback.reset();
+        st.mm_rollback_prompt.reset();
+        st.mm_committed = false;
+        if (n_cache_hit) *n_cache_hit = 0;
+        // 至多重算一次。重算路径仍执行召回，但不再次回放查询。
+        if (allow_replay) return run_prefill_multimodal(st, io, n_cache_hit, false);
+        st.mm_error = e.what();
+        st.mm_error_status = 500;
+        return false;
     } catch (const std::exception & e) {
         st.mm_error = e.what();
         if (dynamic_cast<const std::invalid_argument *>(&e)) st.mm_error_status = 400;

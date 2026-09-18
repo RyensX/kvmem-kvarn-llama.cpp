@@ -27,6 +27,7 @@ public:
 
     void clear(bool data) override;
 
+    bool can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const override;
     bool seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) override;
 
     llama_memory_kvmem * attn_kvmem() { return attn_kvmem_.get(); }

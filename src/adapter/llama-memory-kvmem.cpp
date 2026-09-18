@@ -1603,6 +1603,10 @@ void llama_memory_kvmem::clear(bool data) {
     reset_policy();
 }
 
+bool llama_memory_kvmem::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    return kvarn_ ? kvarn_->can_seq_rm(seq_id, p0, p1) : kv_->can_seq_rm(seq_id, p0, p1);
+}
+
 bool llama_memory_kvmem::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     ++attention_epoch_;
     const bool ok = kvarn_ ? kvarn_->seq_rm(seq_id, p0, p1) : kv_->seq_rm(seq_id, p0, p1);
@@ -3944,6 +3948,16 @@ void llama_kvmem_freeze_query(bool frozen) {
 llama_pos llama_kvmem_model_pos(uint32_t logical) {
     auto * mem = kvmem_capture_active();
     return mem ? mem->model_pos(logical) : (llama_pos) logical;
+}
+
+bool llama_kvmem_can_restore_logical(llama_context * ctx, llama_pos begin) {
+    auto * native = llama_get_memory(ctx);
+    auto * hybrid = dynamic_cast<llama_memory_hybrid *>(native);
+    auto * attn = hybrid ? hybrid->get_mem_attn() : native;
+    auto * adapter = dynamic_cast<llama_memory_kvmem *>(attn);
+    auto * kvarn = adapter ? adapter->get_kvarn() : dynamic_cast<llama_kv_cache_kvarn *>(attn);
+    // 普通 KV 支持按逻辑行删除；循环状态由调用方从检查点恢复。
+    return !kvarn || kvarn->can_seq_rm_logical(0, begin, -1);
 }
 
 bool llama_kvmem_remove_logical(llama_context * ctx, llama_pos begin, llama_pos end) {

@@ -8,6 +8,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 enable_testing()
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if (Python3_Interpreter_FOUND)
+    add_test(NAME kvmem-query-replay-safety-static
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/query-replay-safety-static.py)
+endif()
 add_subdirectory(kvmem)
 
 add_executable(kvmem-output-limit-test tests/output-limit-test.cpp)

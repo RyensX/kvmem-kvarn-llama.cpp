@@ -143,7 +143,24 @@ void llama_memory_kvmem_hybrid::clear(bool data) {
     }
 }
 
+bool llama_memory_kvmem_hybrid::can_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    if (!(attn_kvmem_ ? attn_kvmem_->can_seq_rm(seq_id, p0, p1)
+                     : get_mem_attn()->can_seq_rm(seq_id, p0, p1))) return false;
+    const auto * recr = get_mem_recr();
+    const llama_pos begin = std::max<llama_pos>(0, p0);
+    const llama_pos last = recr->seq_pos_max(seq_id);
+    const llama_pos end = p1 < 0 ? std::numeric_limits<llama_pos>::max() : p1;
+    // 与 seq_rm 的语义一致：查询回放单独恢复 GDN，仅短后缀触发快照回滚。
+    if ((seq_id <= 0 && begin == 0 && p1 < 0) ||
+            (recr->n_rs_seq > 0 && begin > 0 && last >= begin && end > last &&
+             last - begin + 1 <= llama_pos(recr->n_rs_seq))) {
+        return recr->can_seq_rm(seq_id, p0, p1);
+    }
+    return true;
+}
+
 bool llama_memory_kvmem_hybrid::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    if (!can_seq_rm(seq_id, p0, p1)) return false;
     const llama_pos p0n = p0 < 0 ? 0 : p0;
     const bool full = seq_id <= 0 && p0n == 0 && p1 < 0;
     llama_memory_recurrent * recr = get_mem_recr();

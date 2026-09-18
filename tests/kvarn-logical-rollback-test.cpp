@@ -50,6 +50,19 @@ int main() {
     append(meta, 128, 128);
     append(meta, 256, 128);
     append(meta, 384, 4);
+    // 查询回放必须先检查真实删除能力；拒绝后完整重算，不能把旧位置追加到新 cell。
+    CHECK(!llama_memory_can_seq_rm(&cache, 0, 129, 388));
+    CHECK(meta.seq_pos_max(0) == 387);
+    CHECK(!llama_memory_seq_rm(&cache, 0, 129, 388));
+    CHECK(meta.seq_pos_max(0) == 387);
+    cache.clear(true);
+    append(meta, 0, 128);
+    append(meta, 128, 128);
+    append(meta, 256, 128);
+    append(meta, 384, 4);
+    CHECK(llama_memory_can_seq_rm(&cache, 0, 386, 388));
+    CHECK(llama_memory_seq_rm(&cache, 0, 386, 388));
+    append(meta, 386, 2);
     CHECK(!cache.seq_rm_logical(0, 129, -1));
     CHECK(meta.seq_pos_max(0) == 387);
     CHECK(!cache.seq_rm_logical(0, 380, 385));

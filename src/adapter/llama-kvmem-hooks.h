@@ -84,6 +84,8 @@ LLAMA_API void llama_kvmem_keep_selected(void);
 LLAMA_API void llama_kvmem_pin_working_set(void);
 LLAMA_API uint32_t llama_kvmem_free_slots(void);
 LLAMA_API void llama_kvmem_truncate_cached(uint32_t n_past);
+// 检查恢复循环状态之前，attention KV 能否安全截断到指定逻辑行。
+LLAMA_API bool llama_kvmem_can_restore_logical(struct llama_context * ctx, llama_pos begin);
 // Row-based removal, with native recurrent positions preserved.
 LLAMA_API bool llama_kvmem_remove_logical(struct llama_context * ctx, llama_pos begin, llama_pos end);
 LLAMA_API llama_pos llama_kvmem_model_pos(uint32_t logical_pos);
