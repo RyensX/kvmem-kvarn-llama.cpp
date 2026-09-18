@@ -10,6 +10,10 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 enable_testing()
 add_subdirectory(kvmem)
 
+add_executable(kvmem-output-limit-test tests/output-limit-test.cpp)
+target_include_directories(kvmem-output-limit-test PRIVATE tools llama.cpp/vendor)
+add_test(NAME kvmem-output-limit-test COMMAND kvmem-output-limit-test)
+
 option(KVMEM_BUILD_LLAMA "Build llama.cpp with the KVMem adapter" ON)
 if (KVMEM_BUILD_LLAMA)
     if (NOT CMAKE_CUDA_COMPILER AND EXISTS "/home/leye/kvmem_qw3/.cu13-env/bin/nvcc")

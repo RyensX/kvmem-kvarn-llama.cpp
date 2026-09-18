@@ -3743,6 +3743,11 @@ void llama_kvmem_trace_cells(struct llama_context * /*ctx*/, const char * tag) {
     }
 }
 
+bool llama_kvmem_uses_kvarn_resident_store(void) {
+    auto * mem = kvmem_capture_active();
+    return mem && mem->uses_kvarn_resident_store();
+}
+
 bool llama_kvmem_has_recurrent(void) {
     llama_memory_kvmem * mem = kvmem_capture_active();
     return mem && mem->has_recurrent();

@@ -1842,8 +1842,10 @@ int main(int argc, char ** argv) {
     });
 
     if (!kvmem_mount_ui(svr, ui_dir, no_ui, argv[0])) return 1;
-    const int generation_limit = st.kparams.enabled && st.kparams.gen_reserve > 0 ?
-        std::min(n_ctx, (int) st.kparams.gen_reserve) : n_ctx;
+    // 驻留缓存会滚动生成窗口，预留窗口不再是输出长度上限。
+    const int context_limit = static_cast<int>(llama_n_ctx(st.ctx));
+    const int generation_limit = kvmem_generation_limit(context_limit, st.kparams.enabled,
+        st.kparams.gen_reserve, llama_kvmem_uses_kvarn_resident_store());
     json kwargs = json::object();
     for (const auto & item : st.template_kwargs) kwargs[item.first] = json::parse(item.second);
     const auto thinking_params = kvmem_ui_sampling(true, st.sampling_overrides);
