@@ -43,7 +43,7 @@ KVMem retrieval is on by default, with 128-token blocks, query replay `auto`, qu
 
 ## How KVMem attaches to llama.cpp
 
-`kvmem/` holds the host store and retrieval logic; `src/adapter/` connects it through the vendored runtime’s memory interface. With ordinary KV formats, reselection transfers only blocks that changed. With KVarN, compressed records stay on GPU and reselection updates the compact attention index list.
+`kvmem/` holds the host store and retrieval logic; `src/adapter/` connects it through the patched runtime’s memory interface. With ordinary KV formats, reselection transfers only blocks that changed. With KVarN, compressed records stay on GPU and reselection updates the compact attention index list.
 
 ## Tested platform
 
@@ -65,10 +65,18 @@ Check `nvcc --version` for the compiler selected by CMake; `release 13.2` alone 
 git clone https://github.com/kvmem/kvmem-llama.cpp.git
 cd kvmem-llama.cpp
 git checkout v0.16.0-rc1
+git submodule update --init
 scripts/build-cuda.sh
 ```
 
-The inference runtime is maintained directly under `llama.cpp/`; cloning this repository is sufficient.
+The inference runtime remains a pinned BeeLlama submodule. The build script
+applies the repository-owned KVMem patch automatically. On Windows, initialize
+and patch it before running CMake:
+
+```powershell
+git submodule update --init
+powershell -ExecutionPolicy Bypass -File scripts/apply-patches.ps1
+```
 
 `scripts/build-cuda.sh` sets `GGML_CUDA_FA_ALL_QUANTS=ON` (needed for `--kv-dtype q5_0` on hybrid models). Binaries: `build/bin/llama-kvmem-server`.
 
