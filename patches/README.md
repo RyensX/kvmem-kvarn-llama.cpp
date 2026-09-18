@@ -1,28 +1,19 @@
 # llama.cpp patch replay
 
-`llama-kvmem-current.patch` is the cumulative diff against pinned `b81c99b`.
-It includes the existing KVMem hooks, multimodal batch, MTP, media
-parser and mtmd helper extensions, plus FP32 GDN Record/Fold for ReplaySSM.
-It also fixes reasoning-budget initialization from a template's generation prefix.
-`scripts/apply-patches.sh` applies it
-without creating commits and checks for an already applied tree.
+`llama.cpp` remains a submodule, pinned to BeeLlama
+`78af8326522d94fb5fc24b60cfd6f26e29f12490`. The main repository owns the
+KVMem integration as `llama-kvmem-current.patch`; upstream source is not
+vendored into the main repository.
 
-`reasoning-budget-upgrade.patch` upgrades the v0.15.0 ReplaySSM tree.
-`replayssm-upgrade.patch` upgrades the preceding multimodal/query-replay tree.
-`multimodal-upgrade.patch` upgrades the KVMem working tree recorded before
-the 2026-09-14 implementation to the same current code. The script checks applicability before
-changing files. Unrelated local changes are preserved; conflicting changes
-require review.
-
-The numbered `0001` through `0004` files are historical patches, retained for
-reference. They are superseded by the cumulative diff: the old series did
-not cleanly replay on the current pin and must not be applied together with it.
+`scripts/apply-patches.sh` and `scripts/apply-patches.ps1` apply the cumulative
+patch without creating commits. Both are repeatable and reject an unexpected
+submodule revision or a partially modified tree.
 
 To check a clean extraction without changing the active submodule:
 
 ```bash
 mkdir -p /tmp/kvmem-llama-patch-check
-git -C llama.cpp archive b81c99b | tar -x -C /tmp/kvmem-llama-patch-check
+git -C llama.cpp archive 78af832 | tar -x -C /tmp/kvmem-llama-patch-check
 KVMEM_LLAMA_DIR=/tmp/kvmem-llama-patch-check scripts/apply-patches.sh
 KVMEM_LLAMA_DIR=/tmp/kvmem-llama-patch-check scripts/apply-patches.sh
 ```

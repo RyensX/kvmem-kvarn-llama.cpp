@@ -294,7 +294,7 @@ void KvMemRuntime::stage_in(uint32_t block_id) {
     if (b.tier == KvTier::GPU && b.gpu_slot >= 0) {
         return;
     }
-    const int32_t gpu = backend_->alloc_gpu_slot();
+    const int32_t gpu = backend_->alloc_gpu_slot_for_block(block_id);
     const uint8_t *src = nullptr;
     bool from_nvme = false;
     auto pit = prefetch_buf_.find(block_id);

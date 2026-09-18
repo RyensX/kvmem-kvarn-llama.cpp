@@ -28,7 +28,7 @@ static void print_usage(const char * argv0) {
             "  --tokens-only              print generated token ids, one per line\n"
             "  --no-prompt                do not echo the prompt (generation only)\n"
             "  --kvmem                    enable KVMem slot-pool memory\n"
-            "  --kvmem-block-tokens N     block size (default 32)\n"
+            "  --kvmem-block-tokens N     block size (default 128; KVarN requires 128)\n"
             "  --kvmem-budget N           GPU working-set tokens; 0 = n_ctx (identity)\n"
             "  --kvmem-gen-reserve N      extra GPU tokens for decode (default 256)\n"
             "  --kvmem-sink-tokens N      always-kept prefix; 0 = one block\n"
@@ -45,7 +45,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
             "  --kvmem-raw-k-nvme         store raw-K and V on NVMe (needs --kvmem-nvme-gb)\n"
             "  --kvmem-dump-kv            after prefill, compare raw-rebuild KV vs GPU KV\n"
-            "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | q8_0 | q5_0 | q4_0 (default q8_0)\n"
+            "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | q8_0 | q5_0 | q4_0 | kvarn2..8 (default q8_0)\n"
             "  -ctk, --cache-type-k TYPE  GPU K cache type (llama.cpp name; default q8_0)\n"
             "  -ctv, --cache-type-v TYPE  GPU V cache type (must match K when quantized)\n"
             "  --spec-type TYPE           none | draft-mtp (default none)\n"
@@ -76,7 +76,7 @@ int main(int argc, char ** argv) {
     bool no_prompt = false;
 
     llama_kvmem_params kparams = {};
-    kparams.block_tokens = 32;
+    kparams.block_tokens = 128;
     kparams.gen_reserve = 256;
     kparams.method = 1;  // retrieval
     kparams.query_begin = -1;
@@ -88,6 +88,8 @@ int main(int argc, char ** argv) {
     bool dump_kv = false;
     ggml_type cache_type_k = GGML_TYPE_Q8_0;
     ggml_type cache_type_v = GGML_TYPE_Q8_0;
+    int32_t cache_kvarn_bits_k = 0;
+    int32_t cache_kvarn_bits_v = 0;
     ggml_type spec_cache_type = GGML_TYPE_COUNT;
     bool spec_mtp = false;
     int spec_n_max = 2;
@@ -155,19 +157,23 @@ int main(int argc, char ** argv) {
             dump_kv = true;
         } else if (eq(arg, "--kv-dtype") || eq(arg, "-ctk") || eq(arg, "--cache-type-k")
                    || eq(arg, "-ctv") || eq(arg, "--cache-type-v")) {
-            bool ok = false;
-            const ggml_type t = kvmem_parse_cache_type(need(arg), &ok);
-            if (!ok) {
-                fprintf(stderr, "unsupported cache type (want f16|q8_0|q4_0|f32)\n");
+            ggml_type t;
+            int32_t kvarn_bits = 0;
+            if (!kvmem_parse_target_cache_type(need(arg), t, kvarn_bits)) {
+                fprintf(stderr, "unsupported cache type (want f16|q8_0|q5_0|q4_0|f32|kvarn2..8)\n");
                 return 1;
             }
             if (eq(arg, "-ctv") || eq(arg, "--cache-type-v")) {
                 cache_type_v = t;
+                cache_kvarn_bits_v = kvarn_bits;
             } else if (eq(arg, "-ctk") || eq(arg, "--cache-type-k")) {
                 cache_type_k = t;
+                cache_kvarn_bits_k = kvarn_bits;
             } else {
                 cache_type_k = t;
                 cache_type_v = t;
+                cache_kvarn_bits_k = kvarn_bits;
+                cache_kvarn_bits_v = kvarn_bits;
             }
         } else if (eq(arg, "--kvmem-gpu-ratio")) {
             kparams.gpu_memory_ratio = std::strtof(need(arg), nullptr);
@@ -274,7 +280,7 @@ int main(int argc, char ** argv) {
     }
 
     if (kparams.enabled && kparams.budget > 0) {
-        const uint32_t bt = kparams.block_tokens ? kparams.block_tokens : 32u;
+        const uint32_t bt = kparams.block_tokens ? kparams.block_tokens : 128u;
         const uint32_t sink = kparams.sink_tokens == 0 ? bt : kparams.sink_tokens;
         const uint32_t room = kparams.budget > sink ? kparams.budget - sink : bt;
         const uint32_t cap = std::min(kparams.gen_reserve ? kparams.gen_reserve : 256u, room);
@@ -330,12 +336,16 @@ int main(int argc, char ** argv) {
     ctx_params.n_ubatch = static_cast<uint32_t>(n_ubatch);
     ctx_params.n_seq_max = 1;
     ctx_params.no_perf = false;
-    if (!kvmem_cache_types_ok(cache_type_k, cache_type_v)) {
-        fprintf(stderr, "quantized K/V cache types must match (CUDA FA: q8_0/q8_0 or q4_0/q4_0)\n");
+    llama_kvarn_params kvarn;
+    if (!kvmem_cache_config(
+            cache_type_k, cache_type_v,
+            cache_kvarn_bits_k, cache_kvarn_bits_v, kvarn)) {
+        fprintf(stderr, "invalid K/V cache pair\n");
         return 1;
     }
     ctx_params.type_k = cache_type_k;
     ctx_params.type_v = cache_type_v;
+    ctx_params.kvarn = kvarn;
     if (spec_mtp) {
         const uint32_t n_out = (uint32_t) (1 + std::max(0, spec_n_max));
         ctx_params.n_outputs_max = n_out;

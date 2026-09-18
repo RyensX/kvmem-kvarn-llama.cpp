@@ -13,6 +13,9 @@ public:
     virtual ~KvMemBackend() = default;
 
     virtual int32_t alloc_gpu_slot() { return -1; }
+    virtual int32_t alloc_gpu_slot_for_block(uint32_t /*block_id*/) {
+        return alloc_gpu_slot();
+    }
     virtual void free_gpu_slot(int32_t /*slot*/) {}
 
     // Byte copies. P0 stubs are no-ops so unit tests stay GPU-free.

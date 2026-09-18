@@ -51,10 +51,58 @@ ggml_type kvmem_parse_cache_type(const char * s, bool * ok) {
     return GGML_TYPE_F16;
 }
 
+bool kvmem_parse_target_cache_type(
+        const char * s, ggml_type & backing_type, int32_t & kvarn_bits) {
+    kvarn_bits = 0;
+    bool ok = false;
+    backing_type = kvmem_parse_cache_type(s, &ok);
+    if (ok) {
+        return true;
+    }
+
+    if (!s || std::strncmp(s, "kvarn", 5) != 0 || s[5] == '\0' || s[6] != '\0') {
+        return false;
+    }
+    const int32_t bits = s[5] - '0';
+    switch (bits) {
+        case 2: backing_type = GGML_TYPE_Q2_0S; break;
+        case 3: backing_type = GGML_TYPE_Q3_0;  break;
+        case 4: backing_type = GGML_TYPE_Q4_0;  break;
+        case 5: backing_type = GGML_TYPE_Q5_0;  break;
+        case 6: backing_type = GGML_TYPE_Q6_0;  break;
+        case 8: backing_type = GGML_TYPE_Q8_0;  break;
+        default: return false;
+    }
+    kvarn_bits = bits;
+    return true;
+}
+
 bool kvmem_cache_types_ok(ggml_type type_k, ggml_type type_v) {
     if (ggml_is_quantized(type_k) || ggml_is_quantized(type_v)) {
         return type_k == type_v;
     }
+    return true;
+}
+
+bool kvmem_cache_config(
+        ggml_type type_k, ggml_type type_v,
+        int32_t kvarn_bits_k, int32_t kvarn_bits_v,
+        llama_kvarn_params & kvarn) {
+    kvarn = llama_kvarn_default_params();
+    if (kvarn_bits_k == 0 && kvarn_bits_v == 0) {
+        return kvmem_cache_types_ok(type_k, type_v);
+    }
+    if (kvarn_bits_k == 0 || kvarn_bits_v == 0) {
+        return false;
+    }
+
+    char name[32];
+    std::snprintf(name, sizeof(name), "kvarn_k%dv%d_g128", kvarn_bits_k, kvarn_bits_v);
+    const llama_kvarn_type type = llama_kvarn_type_from_name(name);
+    if (type == LLAMA_KVARN_TYPE_INVALID) {
+        return false;
+    }
+    kvarn = llama_kvarn_params_for_type(type);
     return true;
 }
 

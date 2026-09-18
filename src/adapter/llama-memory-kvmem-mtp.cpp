@@ -81,6 +81,13 @@ llama_memory_kvmem_mtp::llama_memory_kvmem_mtp(
             filter,
             nullptr,
             nullptr,
+            cparams.n_ubatch,
+            params.kv_tail_tokens,
+            params.kv_tail_type == GGML_TYPE_COUNT ? GGML_TYPE_F16 : params.kv_tail_type,
+            params.kv_tail_tokens_requested,
+            false,
+            params.kv_tail_rollback_tokens,
+            0,
             "kvmem-mtp");
 
     const size_t krow = ggml_row_size(type_k_, n_embd_k_);
@@ -256,6 +263,16 @@ bool llama_memory_kvmem_mtp::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
     if (target_ && kv_->seq_pos_max(seq_id) >= std::max<llama_pos>(0, p0) &&
             (p1 < 0 || kv_->seq_pos_min(seq_id) < p1)) target_->note_attention_change();
     return kv_->seq_rm(seq_id, p0, p1);
+}
+
+bool llama_memory_kvmem_mtp::seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) {
+    if (target_) target_->note_attention_change();
+    return kv_->seq_rm_cell(seq_id, cell_idx);
+}
+
+int llama_memory_kvmem_mtp::cells_at_pos(
+        llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) {
+    return kv_->cells_at_pos(seq_id, pos, cell_indices, n_max);
 }
 
 void llama_memory_kvmem_mtp::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {

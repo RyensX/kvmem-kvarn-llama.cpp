@@ -18,7 +18,7 @@ extern "C" {
 
 struct llama_kvmem_params {
     bool enabled;
-    uint32_t block_tokens;  // 0 → 32
+    uint32_t block_tokens;  // 0 → 128 for KVarN, otherwise 32
     uint32_t budget;        // tokens; 0 → use n_ctx (identity / no sparse)
     uint32_t gen_reserve;   // tokens; 0 → 256
     uint32_t sink_tokens;   // 0 → one block

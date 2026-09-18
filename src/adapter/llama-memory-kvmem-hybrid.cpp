@@ -2,6 +2,7 @@
 
 #include "llama-cparams.h"
 #include "llama-impl.h"
+#include "llama-kv-cache-kvarn.h"
 #include "llama-model.h"
 
 #include <algorithm>
@@ -29,34 +30,60 @@ static bool use_gdn_replay(const llama_model & model, const llama_cparams & cp) 
     return supported && mode == 2;
 }
 
+static std::unique_ptr<llama_memory_i> make_kvmem_attention_memory(
+        const llama_model & model,
+        const llama_memory_params & params,
+        const llama_cparams & cparams) {
+    const auto filter = [&](int32_t il) {
+        return il < int32_t(model.hparams.n_layer()) && !model.hparams.is_recr(il);
+    };
+    const ggml_type tail_type = params.kv_tail_type == GGML_TYPE_COUNT ?
+            GGML_TYPE_F16 : params.kv_tail_type;
+    if (params.kvarn.type != LLAMA_KVARN_TYPE_DISABLED) {
+        return std::make_unique<llama_kv_cache_kvarn>(
+                model, model.hparams, params.kvarn, cparams.offload_kqv,
+                /* unified */ true, cparams.n_ctx_seq, /* n_seq_max */ 1,
+                cparams.n_batch, cparams.n_ubatch, 1, model.hparams.n_swa,
+                model.hparams.swa_type, filter, nullptr, params.kv_tail_tokens,
+                tail_type, params.kv_tail_tokens_requested, params.kv_tail_rollback_tokens);
+    }
+    return std::make_unique<llama_kv_cache>(
+            model, model.hparams, params.type_k, params.type_v,
+            !cparams.flash_attn, cparams.offload_kqv, /* unified */ true,
+            llama_kvmem_pool_cells(model, params, cparams), /* n_seq_max */ 1,
+            1, model.hparams.n_swa, model.hparams.swa_type,
+            nullptr, filter, nullptr, nullptr, cparams.n_ubatch,
+            params.kv_tail_tokens, tail_type, params.kv_tail_tokens_requested,
+            false, params.kv_tail_rollback_tokens);
+}
+
+static std::unique_ptr<llama_memory_recurrent> make_kvmem_recurrent_memory(
+        const llama_model & model,
+        const llama_cparams & cparams) {
+    const auto filter = [&](int32_t il) {
+        return il < int32_t(model.hparams.n_layer()) && model.hparams.is_recr(il);
+    };
+    return std::make_unique<llama_memory_recurrent>(
+            model, GGML_TYPE_F32, GGML_TYPE_F32, cparams.offload_kqv,
+            std::max(uint32_t(1), cparams.n_seq_max), cparams.n_seq_max,
+            cparams.n_rs_seq, filter, use_gdn_replay(model, cparams));
+}
+
 llama_memory_kvmem_hybrid::llama_memory_kvmem_hybrid(
         const llama_model & model,
         const llama_memory_params & params,
         const llama_cparams & cparams) :
     llama_memory_hybrid(
             model,
-            params.type_k,
-            params.type_v,
-            !cparams.flash_attn,
-            llama_kvmem_pool_cells(model, params, cparams),
-            /* n_pad */ 1,
-            model.hparams.n_swa,
-            model.hparams.swa_type,
-            GGML_TYPE_F32,
-            GGML_TYPE_F32,
-            std::max((uint32_t) 1, cparams.n_seq_max),
-            cparams.n_seq_max,
-            cparams.n_rs_seq,
-            cparams.offload_kqv,
-            /* unified */ true,
-            [&](int32_t il) {
-                return il < (int32_t) model.hparams.n_layer() && !model.hparams.is_recr(il);
-            },
-            [&](int32_t il) {
-                return il < (int32_t) model.hparams.n_layer() && model.hparams.is_recr(il);
-            }, use_gdn_replay(model, cparams)) {
+            make_kvmem_attention_memory(model, params, cparams),
+            make_kvmem_recurrent_memory(model, cparams)) {
+    auto * attn_cache = dynamic_cast<llama_kv_cache *>(get_mem_attn());
+    auto * kvarn_cache = dynamic_cast<llama_kv_cache_kvarn *>(get_mem_attn());
+    if (!attn_cache && !kvarn_cache) {
+        throw std::runtime_error("KVMem requires a standard attention cache");
+    }
     attn_kvmem_ = std::make_unique<llama_memory_kvmem>(
-            model, params, cparams, get_mem_attn());
+            model, params, cparams, attn_cache, kvarn_cache);
     attn_kvmem_->set_recurrent(get_mem_recr());
     LLAMA_LOG_INFO("%s: KVMem hybrid (attn=slot-pool recr=stock) n_rs_seq=%u\n",
             __func__, cparams.n_rs_seq);
@@ -77,7 +104,7 @@ llama_memory_context_ptr llama_memory_kvmem_hybrid::init_batch(
             } else {
                 // Keep GDN rollback snapshots valid: trailing (1 + n_rs_seq)
                 // tokens of each seq stay in one ubatch.
-                const bool unified = (get_mem_attn()->get_n_stream() == 1);
+                const bool unified = (get_mem_attn()->get_kv_n_stream() == 1);
                 const uint32_t n_rs_seq = get_mem_recr()->n_rs_seq;
                 ubatch = balloc.split_equal(n_ubatch, !unified, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
             }
@@ -96,14 +123,14 @@ llama_memory_context_ptr llama_memory_kvmem_hybrid::init_batch(
             return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
 
-        llama_kv_cache::slot_info_vec_t sinfos;
-        if (!attn_kvmem_->prepare_ubatches(ubatches, balloc.get_n_tokens(), sinfos)) {
+        auto ctx_attn = attn_kvmem_->init_prepared_ubatches(
+                ubatches, balloc.get_n_tokens());
+        if (!ctx_attn || llama_memory_status_is_fail(ctx_attn->get_status())) {
             LLAMA_LOG_ERROR("%s: failed to prepare KVMem attention ubatches\n", __func__);
             return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
-
         return std::make_unique<llama_memory_hybrid_context>(
-                this, std::move(sinfos), std::move(ubatches));
+                this, std::move(ctx_attn), std::move(ubatches));
     } while (false);
 
     return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);

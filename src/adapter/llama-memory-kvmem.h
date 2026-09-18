@@ -16,6 +16,8 @@
 #include <thread>
 #include <vector>
 
+class llama_kv_cache_kvarn;
+
 struct llama_model;
 struct llama_cparams;
 struct llama_memory_params;
@@ -35,7 +37,8 @@ public:
             const llama_model & model,
             const llama_memory_params & params,
             const llama_cparams & cparams,
-            llama_kv_cache * ext_kv = nullptr);
+            llama_kv_cache * ext_kv = nullptr,
+            llama_kv_cache_kvarn * ext_kvarn = nullptr);
 
     ~llama_memory_kvmem() override;
 
@@ -53,6 +56,8 @@ public:
     void clear(bool data) override;
 
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
+    bool seq_rm_cell(llama_seq_id seq_id, uint32_t cell_idx) override;
+    int cells_at_pos(llama_seq_id seq_id, llama_pos pos, uint32_t * cell_indices, int n_max) override;
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id) override;
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
@@ -67,6 +72,8 @@ public:
     void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) override;
 
     llama_kv_cache * get_kv() { return kv_; }
+    llama_kv_cache_kvarn * get_kvarn() { return kvarn_; }
+    bool uses_kvarn_resident_store() const { return kvarn_ != nullptr; }
     kvmem::KvMemRuntime & runtime() { return *runtime_; }
     const kvmem::KvMemRuntime & runtime() const { return *runtime_; }
 
@@ -80,6 +87,9 @@ public:
             const std::vector<llama_ubatch> & ubatches,
             uint32_t n_new_tokens,
             llama_kv_cache::slot_info_vec_t & sinfos);
+    llama_memory_context_ptr init_prepared_ubatches(
+            const std::vector<llama_ubatch> & ubatches,
+            uint32_t n_new_tokens);
     void reset_policy();
 
     int32_t alloc_slot();
@@ -144,7 +154,13 @@ public:
         retrieval_pinned_ = true;
         keep_selected_ = true;
     }
-    size_t free_slot_count() const { return free_slots_.size(); }
+    size_t free_slot_count() const {
+        if (kvarn_ && runtime_) {
+            return n_slots_ > runtime_->store().block_count() ?
+                    n_slots_ - runtime_->store().block_count() : 0;
+        }
+        return free_slots_.size();
+    }
     void truncate_cached(uint32_t n_past);
     void occupy_in(llama_kv_cache * cache, uint32_t block_id);
     llama_pos model_pos(uint32_t logical_pos) const;
@@ -185,6 +201,9 @@ private:
     struct SlotBackend : public kvmem::KvMemBackend {
         llama_memory_kvmem * owner = nullptr;
         int32_t alloc_gpu_slot() override { return owner->alloc_slot(); }
+        int32_t alloc_gpu_slot_for_block(uint32_t block_id) override {
+            return owner->alloc_slot_for_block(block_id);
+        }
         void free_gpu_slot(int32_t slot) override { owner->free_slot(slot); }
         void copy_block_to_host(uint32_t block_id, int32_t gpu_slot,
                                 void * host, uint64_t bytes) override {
@@ -195,6 +214,9 @@ private:
             owner->copy_gpu_block_from_host(block_id, gpu_slot, host, bytes);
         }
     };
+
+    int32_t alloc_slot_for_block(uint32_t block_id);
+    void update_kvarn_attention_cells();
 
     uint32_t resident_tokens() const;
     bool prepare_working_set(uint32_t n_new_tokens);
@@ -333,12 +355,15 @@ private:
 
     const llama_model & model_;
     uint32_t block_tokens_ = 128;
+    uint32_t active_pool_tokens_ = 0;
     uint32_t kv_size_ = 0;
     uint32_t n_slots_ = 0;
     bool trace_ = false;
 
     std::unique_ptr<llama_kv_cache> kv_owned_;
     llama_kv_cache * kv_ = nullptr;
+    std::unique_ptr<llama_kv_cache_kvarn> kvarn_owned_;
+    llama_kv_cache_kvarn * kvarn_ = nullptr;
     llama_memory_recurrent * recr_ = nullptr;
     struct GdnReplay;
     std::unique_ptr<GdnReplay> gdn_replay_;

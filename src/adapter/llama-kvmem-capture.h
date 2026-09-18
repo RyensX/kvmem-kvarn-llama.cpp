@@ -4,7 +4,7 @@
 
 #include <vector>
 
-struct llama_memory_kvmem;
+class llama_memory_kvmem;
 class llama_memory_kvmem_mtp;
 struct ggml_tensor;
 

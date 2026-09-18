@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+"$ROOT/scripts/apply-patches.sh"
+
 CU13="${CU13:-/home/leye/kvmem_qw3/.cu13-env}"
 if [[ -x "$CU13/bin/nvcc" ]]; then
     export PATH="$CU13/bin:${PATH:-}"

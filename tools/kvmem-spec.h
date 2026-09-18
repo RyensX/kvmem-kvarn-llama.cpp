@@ -27,11 +27,20 @@ struct kvmem_spec_opts {
     ggml_type draft_type = GGML_TYPE_COUNT; // inherit target K/V types unless overridden
 };
 
-// Supported cache types: f16, f32, q8_0, q5_0, q4_0.
+// Supported standard cache types: f16, f32, q8_0, q5_0, q4_0.
 // q5_0 requires GGML_CUDA_FA_ALL_QUANTS (enabled by this project's build).
 ggml_type kvmem_parse_cache_type(const char * s, bool * ok);
+// Target caches additionally accept kvarn2/3/4/5/6/8. `backing_type` is the
+// standard-width fallback used when KVarN is unavailable; `kvarn_bits` is zero
+// for ordinary cache types.
+bool kvmem_parse_target_cache_type(
+        const char * s, ggml_type & backing_type, int32_t & kvarn_bits);
 // Quantized K/V must match in the supported configurations.
 bool kvmem_cache_types_ok(ggml_type type_k, ggml_type type_v);
+bool kvmem_cache_config(
+        ggml_type type_k, ggml_type type_v,
+        int32_t kvarn_bits_k, int32_t kvarn_bits_v,
+        llama_kvarn_params & kvarn);
 
 struct kvmem_spec_session {
     common_params spec_params;

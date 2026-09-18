@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LLAMA="$ROOT/llama.cpp"
-TARGET="${1:-origin/master}"
+TARGET="${1:-78af8326522d94fb5fc24b60cfd6f26e29f12490}"
 
 cd "$LLAMA"
 git fetch --tags origin

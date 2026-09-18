@@ -83,7 +83,7 @@ static void print_usage(const char * argv0) {
             "  --kvmem-nvme-dir PATH      NVMe directory (default /tmp/kvmem_nvme)\n"
             "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
             "  --kvmem-raw-k-nvme         store raw-K and V on NVMe (needs --kvmem-nvme-gb)\n"
-            "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | q8_0 | q5_0 | q4_0 (default q8_0)\n"
+            "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | q8_0 | q5_0 | q4_0 | kvarn2..8 (default q8_0)\n"
             "  -ctk, --cache-type-k TYPE  GPU K cache type (llama.cpp name; default q8_0)\n"
             "  -ctv, --cache-type-v TYPE  GPU V cache type (must match K when quantized)\n"
             "  --spec-type TYPE           none | draft-mtp (default none)\n"
@@ -190,6 +190,8 @@ struct ServerState {
     kvmem_spec_session spec;
     ggml_type cache_type_k = GGML_TYPE_Q8_0;
     ggml_type cache_type_v = GGML_TYPE_Q8_0;
+    int32_t cache_kvarn_bits_k = 0;
+    int32_t cache_kvarn_bits_v = 0;
     ggml_type spec_cache_type = GGML_TYPE_F16;
     bool spec_mtp = false;
     int spec_n_max = 3;
@@ -1635,19 +1637,23 @@ int main(int argc, char ** argv) {
             st.kparams.raw_k_nvme = true;
         } else if (eq(arg, "--kv-dtype") || eq(arg, "-ctk") || eq(arg, "--cache-type-k")
                    || eq(arg, "-ctv") || eq(arg, "--cache-type-v")) {
-            bool ok = false;
-            const ggml_type t = kvmem_parse_cache_type(need(arg), &ok);
-            if (!ok) {
-                fprintf(stderr, "unsupported cache type (want f16|q8_0|q4_0|f32)\n");
+            ggml_type t;
+            int32_t kvarn_bits = 0;
+            if (!kvmem_parse_target_cache_type(need(arg), t, kvarn_bits)) {
+                fprintf(stderr, "unsupported cache type (want f16|q8_0|q5_0|q4_0|f32|kvarn2..8)\n");
                 return 1;
             }
             if (eq(arg, "-ctv") || eq(arg, "--cache-type-v")) {
                 st.cache_type_v = t;
+                st.cache_kvarn_bits_v = kvarn_bits;
             } else if (eq(arg, "-ctk") || eq(arg, "--cache-type-k")) {
                 st.cache_type_k = t;
+                st.cache_kvarn_bits_k = kvarn_bits;
             } else {
                 st.cache_type_k = t;
                 st.cache_type_v = t;
+                st.cache_kvarn_bits_k = kvarn_bits;
+                st.cache_kvarn_bits_v = kvarn_bits;
             }
         } else if (eq(arg, "--spec-kv-dtype")) {
             bool ok = false;
@@ -1772,12 +1778,16 @@ int main(int argc, char ** argv) {
     cparams.n_batch = (uint32_t) st.n_batch;
     cparams.n_ubatch = (uint32_t) st.n_batch;
     cparams.n_seq_max = 1;
-    if (!kvmem_cache_types_ok(st.cache_type_k, st.cache_type_v)) {
-        fprintf(stderr, "quantized K/V cache types must match (CUDA FA: q8_0/q8_0 or q4_0/q4_0)\n");
+    llama_kvarn_params kvarn;
+    if (!kvmem_cache_config(
+            st.cache_type_k, st.cache_type_v,
+            st.cache_kvarn_bits_k, st.cache_kvarn_bits_v, kvarn)) {
+        fprintf(stderr, "invalid K/V cache pair\n");
         return 1;
     }
     cparams.type_k = st.cache_type_k;
     cparams.type_v = st.cache_type_v;
+    cparams.kvarn = kvarn;
     if (st.spec_mtp) {
         const uint32_t n_out = (uint32_t) (1 + std::max(0, st.spec_n_max));
         cparams.n_outputs_max = n_out;
