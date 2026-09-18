@@ -20,7 +20,7 @@ KVMem retrieves relevant historical blocks into a bounded GPU window, limiting t
 
 Current milestone: [`v0.16.0-rc1`](docs/milestones/v0.16.0-rc1.md) (pre-release).
 
-**Limitation:** one generation cannot exceed `--kvmem-gen-reserve` (16384 tokens on the IQ3 recipe, 12288 on IQ4), including thinking. Retrieval pins the GPU window; new tokens only use those reserved slots. We are working on fixing this. For agent use, add a line to the system prompt such as: *Keep each turn's output, including thinking, within 16384 tokens* (use 12288 on IQ4). That makes oversized single-turn replies much less likely.
+With an ordinary KV format, one generation cannot exceed `--kvmem-gen-reserve`. The KVarN resident-cache path rotates the oldest generated block out of the visible window while retaining its compressed record on GPU, so decode width stays bounded after the reserve fills.
 
 ## How KVMem works
 
@@ -43,9 +43,7 @@ KVMem retrieval is on by default, with 128-token blocks, query replay `auto`, qu
 
 ## How KVMem attaches to llama.cpp
 
-`kvmem/` holds the host store and retrieval logic; `src/adapter/` connects it through llama.cpp’s memory interface. Attention kernels and original positions stay unchanged. Reselection transfers only blocks that changed.
-
-Do **not** commit a dirty `llama.cpp` working tree. The submodule pointer is the pin; `scripts/apply-patches.sh` replays `patches/`.
+`kvmem/` holds the host store and retrieval logic; `src/adapter/` connects it through the vendored runtime’s memory interface. With ordinary KV formats, reselection transfers only blocks that changed. With KVarN, compressed records stay on GPU and reselection updates the compact attention index list.
 
 ## Tested platform
 
@@ -64,19 +62,34 @@ Building uses a C++17 compiler, CMake and **CUDA Toolkit 13.2 Update 2 (nvcc 13.
 Check `nvcc --version` for the compiler selected by CMake; `release 13.2` alone is insufficient, and the CUDA version shown by `nvidia-smi` describes driver support. After upgrading the Toolkit, configure a **new build directory** and rebuild the binaries. Updating the driver or replacing CUDA DLLs does not fix CUDA kernels already compiled into an old binary.
 
 ```bash
-git clone --recurse-submodules https://github.com/kvmem/kvmem-llama.cpp.git
+git clone https://github.com/kvmem/kvmem-llama.cpp.git
 cd kvmem-llama.cpp
 git checkout v0.16.0-rc1
-git submodule update --init
-scripts/apply-patches.sh
 scripts/build-cuda.sh
 ```
 
-The submodule is ggml-org/llama.cpp at pin `b81c99b`. `scripts/apply-patches.sh` applies `patches/llama-kvmem-current.patch` (or `multimodal-upgrade.patch` on an older KVMem tree). Running it twice is safe. Do **not** apply numbered `0001`–`0004` together with the cumulative patch. See [patches/README.md](patches/README.md).
+The inference runtime is maintained directly under `llama.cpp/`; cloning this repository is sufficient.
 
 `scripts/build-cuda.sh` sets `GGML_CUDA_FA_ALL_QUANTS=ON` (needed for `--kv-dtype q5_0` on hybrid models). Binaries: `build/bin/llama-kvmem-server`.
 
-The build script defaults to `CMAKE_CUDA_ARCHITECTURES=120a-real` for the tested RTX 5060 Ti. For another GPU, set `CMAKE_CUDA_ARCHITECTURES` to its appropriate target when running the script; other GPU targets have not been tested here.
+The build script defaults to `CMAKE_CUDA_ARCHITECTURES=120a-real` for the tested RTX 5060 Ti. An RTX 4070 Ti SUPER uses `CMAKE_CUDA_ARCHITECTURES=89-real`.
+
+## KVarN4 at 128K on a 4070 Ti SUPER
+
+```bash
+CMAKE_CUDA_ARCHITECTURES=89-real scripts/build-cuda.sh
+
+KVMEM_GDN_CHUNK_MIN_TOKENS=64 build/bin/llama-kvmem-server \
+  -m /path/to/model.gguf \
+  -c 131072 -b 512 -ngl 99 \
+  --kv-dtype kvarn4 \
+  --kvmem-budget 16384 \
+  --kvmem-gen-reserve 4096
+```
+
+KVarN uses 128-token records. `--kvmem-budget` controls the retrieved historical attention width; decode work follows roughly `budget + gen_reserve` rather than the full logical context. A zero budget keeps identity behavior and therefore does not cap decode work.
+
+Long GDN prefill batches use the matrix-based chunk graph from 64 tokens by default. `KVMEM_GDN_CHUNK_MIN_TOKENS=0` keeps the fused serial path for every batch; a larger value moves the crossover later. Initial prefill must still process every new token, so its total cost remains proportional to input length.
 
 ## Browser chat
 
@@ -273,7 +286,6 @@ No auth or TLS. Bind `127.0.0.1`. Stream `usage` includes `prompt_cache_hit_toke
 - [v0.16.0-rc1 milestone](docs/milestones/v0.16.0-rc1.md)
 - [Modification plan](docs/modification-plan.md)
 - [Architecture](docs/architecture.md)
-- [Patch replay](patches/README.md)
 - [Recommended 16 GiB performance](docs/recommended-config-performance.md)
 - [256K tool benchmark](docs/long-context-benchmark-2026-09-14.md)
 - [Query replay](docs/query-replay-implementation-report-2026-09-14.md)
@@ -286,8 +298,7 @@ No auth or TLS. Bind `127.0.0.1`. Stream `usage` includes `prompt_cache_hit_toke
 kvmem/            Host KVMem library (no llama.cpp includes)
 src/adapter/      llama_memory_i wrapper
 tools/            llama-kvmem-cli, llama-kvmem-server, vision helpers
-scripts/          apply-patches, CUDA build, GPU bind, start helpers
-patches/          Diffs against the llama.cpp pin
+scripts/          CUDA build, GPU bind, start helpers
 docs/             Architecture, milestones, multimodal
 llama.cpp/        Submodule (pin only; apply patches after clone)
 models/           Local GGUFs (gitignored)

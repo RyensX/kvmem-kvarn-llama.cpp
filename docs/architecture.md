@@ -6,7 +6,7 @@ this library owns selection, tiering, and (later) window assembly.
 ```
 kvmem/          host policy + CPU/NVMe  (this repo, no llama.cpp headers)
 src/adapter/    llama_memory_i wrapper  (P1+)
-llama.cpp/      submodule + thin patches (P1+)
+llama.cpp/      vendored inference runtime
 ```
 
 GPU attention cache is a **bounded block-slot pool** of size
@@ -35,20 +35,25 @@ Hardware split on this machine: RTX 5050 (GPU 0) for models < 27B;
 RTX 5090 (GPU 1) for 27B. Details in `scripts/gpu.sh` and
 `docs/modification-plan.md`.
 
-## Known v1 limit: generation length vs `gen_reserve`
+## Generation length and `gen_reserve`
 
 GPU pool = `budget` (selected working set) + `gen_reserve` (decode slack).
 After retrieval the selected blocks are **pinned**: decode must not
 recency-reselect and drop resurrected blocks. New tokens only take free
 slots in `gen_reserve`.
 
-If the last GPU block is full and there is no free slot left,
+For ordinary KV formats, if the last GPU block is full and there is no free slot left,
 `prepare_working_set` fails with `no free GPU slot for block N`
 (`llama_decode(gen) failed rc=1`). It does **not** evict pinned
 retrieval blocks. One generation therefore cannot exceed
 `--kvmem-gen-reserve` (16384 on IQ3, 12288 on IQ4, CLI default 256),
-including thinking. README documents this and a system-prompt cap.
-We are working on the follow-up below.
+including thinking.
+
+KVarN stores every compressed record on GPU and uses the KVMem tier only as
+an attention-visibility map. Once the active pool fills, the KVarN path hides
+the oldest completed generation block while keeping selected history pinned.
+This keeps decode width at `budget + gen_reserve` without copying records or
+placing a hard limit on one generation.
 
 ### Why not steal slots from the selected set
 
@@ -62,7 +67,7 @@ Streaming the whole generation through VRAM would bring back the
 adaptive-KV-streaming cost curve. NVMe is not implemented in this port;
 host RAM is enough for spilled gen KV.
 
-### Follow-up: ring buffer **inside** `gen_reserve`
+### Ordinary-cache follow-up: ring buffer inside `gen_reserve`
 
 No third pool and no extra VRAM. `gen_reserve` becomes “how much of
 **this turn’s** output attention can still see”, not a hard max length.
