@@ -8,6 +8,11 @@ $Pin = "78af8326522d94fb5fc24b60cfd6f26e29f12490"
 
 Push-Location $Llama
 try {
+    $Head = (git rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $Head -ne $Pin) {
+        throw "llama.cpp is at $Head; expected $Pin; run git submodule sync --recursive followed by git submodule update --init --force --checkout llama.cpp"
+    }
+
     git apply --reverse --check $Patch 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "KVMem patches already applied"
@@ -16,10 +21,6 @@ try {
 
     git apply --check $Patch 2>$null
     if ($LASTEXITCODE -eq 0) {
-        $Head = (git rev-parse HEAD).Trim()
-        if ($LASTEXITCODE -ne 0 -or $Head -ne $Pin) {
-            throw "llama.cpp is at $Head; expected $Pin"
-        }
         git apply $Patch
         if ($LASTEXITCODE -ne 0) { throw "failed to apply KVMem runtime patch" }
         Write-Host "applied KVMem runtime patch to BeeLlama $Pin"

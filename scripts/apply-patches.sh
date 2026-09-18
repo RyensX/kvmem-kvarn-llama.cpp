@@ -8,16 +8,18 @@ WINDOWS_UPGRADE="$ROOT/patches/windows-jinja-encoding-upgrade.patch"
 PIN="78af8326522d94fb5fc24b60cfd6f26e29f12490"
 cd "$LLAMA"
 
+if [[ -d .git || -f .git ]]; then
+    head="$(git rev-parse HEAD)"
+    if [[ "$head" != "$PIN" ]]; then
+        echo "llama.cpp is at $head; expected $PIN" >&2
+        echo "run: git submodule sync --recursive && git submodule update --init --force --checkout llama.cpp" >&2
+        exit 1
+    fi
+fi
+
 if git apply --reverse --check "$PATCH" 2>/dev/null; then
     echo "KVMem patches already applied"
 elif git apply --check "$PATCH" 2>/dev/null; then
-    if [[ -d .git || -f .git ]]; then
-        head="$(git rev-parse HEAD)"
-        if [[ "$head" != "$PIN" ]]; then
-            echo "llama.cpp is at $head; expected $PIN" >&2
-            exit 1
-        fi
-    fi
     git apply "$PATCH"
     echo "applied KVMem runtime patch to BeeLlama $PIN"
 elif git apply --check "$WINDOWS_UPGRADE" 2>/dev/null; then
