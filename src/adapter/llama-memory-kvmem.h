@@ -150,10 +150,7 @@ public:
     // the new tail; recency pressure must not evict selected history.
     void keep_selected_window() { keep_selected_ = true; }
     // After skip/reselect prefill: pin so decode mean-K uses gen_reserve.
-    void pin_working_set() {
-        retrieval_pinned_ = true;
-        keep_selected_ = true;
-    }
+    void pin_working_set();
     size_t free_slot_count() const {
         if (kvarn_ && runtime_) {
             return n_slots_ > runtime_->store().block_count() ?
@@ -217,6 +214,8 @@ private:
 
     int32_t alloc_slot_for_block(uint32_t block_id);
     void update_kvarn_attention_cells();
+    void capture_pinned_blocks();
+    void trim_kvarn_generation_window();
 
     uint32_t resident_tokens() const;
     bool prepare_working_set(uint32_t n_new_tokens);
@@ -392,6 +391,7 @@ private:
     bool replay_ = false;
     bool retrieval_pinned_ = false;
     bool keep_selected_ = false;
+    std::vector<uint32_t> pinned_blocks_;
     bool prefill_capture_ = true;
     int32_t method_ = 0;
     int32_t query_begin_ = -1;

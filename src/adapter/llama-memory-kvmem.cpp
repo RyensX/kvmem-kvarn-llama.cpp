@@ -693,6 +693,7 @@ void llama_memory_kvmem::reset_policy() {
     reset_slots();
     retrieval_pinned_ = false;
     keep_selected_ = false;
+    pinned_blocks_.clear();
     prefill_capture_ = true;
 }
 
@@ -706,7 +707,26 @@ void llama_memory_kvmem::begin_cached_turn(bool reset_query) {
     }
     retrieval_pinned_ = false;
     keep_selected_ = false;
+    pinned_blocks_.clear();
     prefill_capture_ = true;
+}
+
+void llama_memory_kvmem::capture_pinned_blocks() {
+    pinned_blocks_.clear();
+    if (!runtime_) {
+        return;
+    }
+    for (const auto & block : runtime_->store().blocks()) {
+        if (block.gpu_slot >= 0 && block.n_tokens > 0) {
+            pinned_blocks_.push_back(block.block_id);
+        }
+    }
+}
+
+void llama_memory_kvmem::pin_working_set() {
+    retrieval_pinned_ = true;
+    keep_selected_ = true;
+    capture_pinned_blocks();
 }
 
 void llama_memory_kvmem::truncate_cached(uint32_t n_past) {
@@ -795,6 +815,44 @@ void llama_memory_kvmem::update_kvarn_attention_cells() {
         }
     }
     kvarn_->set_attention_cells(std::move(cells));
+}
+
+void llama_memory_kvmem::trim_kvarn_generation_window() {
+    if (!kvarn_ || !runtime_ || !retrieval_pinned_) {
+        return;
+    }
+
+    auto & store = runtime_->store();
+    std::vector<uint8_t> pinned(store.block_count(), 0);
+    for (uint32_t id : pinned_blocks_) {
+        if (id < pinned.size()) {
+            pinned[id] = 1;
+        }
+    }
+
+    uint32_t active_tokens = resident_tokens();
+    if (active_tokens <= active_pool_tokens_) {
+        return;
+    }
+
+    // Block ids follow logical time. Drop the oldest generated blocks first;
+    // the KVarN record remains resident and can be made visible again later.
+    for (auto & block : store.blocks()) {
+        if (active_tokens <= active_pool_tokens_) {
+            break;
+        }
+        if (block.gpu_slot < 0 || block.block_id >= pinned.size() || pinned[block.block_id]) {
+            continue;
+        }
+        active_tokens -= std::min(active_tokens, block.n_tokens);
+        if (mtp_) {
+            // Keep the draft cache's visible window and packed fallback in
+            // lockstep with the target before the target block becomes cold.
+            mtp_->on_stage_out(block.block_id);
+        }
+        store.set_block_tier(block.block_id, kvmem::KvTier::CPU, -1, block.nvme_slot);
+        store.set_block_gpu_slot(block.block_id, -1);
+    }
 }
 
 bool llama_memory_kvmem::slot_for_orig_pos(llama_pos pos, int32_t * slot, uint32_t * off) const {
@@ -1427,6 +1485,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
             return false;
         }
     }
+    trim_kvarn_generation_window();
     if (kvarn_ && kvarn_->has_attention_cell_filter()) {
         update_kvarn_attention_cells();
     }
@@ -3302,6 +3361,7 @@ void llama_memory_kvmem::apply_selection(const llama_kvmem_selection & selection
     apply_plan_to_kv(plan);
     auto & store = runtime_->store();
     retrieval_pinned_ = true;
+    capture_pinned_blocks();
     if (mtp_) {
         const int64_t t0 = ggml_time_us();
         mtp_->harvest_resident_v();
