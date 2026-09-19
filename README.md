@@ -70,13 +70,21 @@ scripts/build-cuda.sh
 ```
 
 The inference runtime remains a pinned BeeLlama submodule. The build script
-applies the repository-owned KVMem patch automatically. On Windows, initialize
-and patch it before running CMake:
+applies the repository-owned KVMem patch automatically. On Windows, run this
+single command from the repository root (ordinary PowerShell is sufficient):
 
 ```powershell
-git submodule update --init
-powershell -ExecutionPolicy Bypass -File scripts/apply-patches.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-cuda.ps1
 ```
+
+The Windows script locates Visual Studio 2022 C++ tools and CMake, checks nvcc
+13.2.86 or newer, synchronizes the submodule, applies and verifies the complete
+runtime patch, then builds the Release server. It stops at the first failed step
+and never resets local source changes. Defaults: RTX 4070 Ti SUPER (`89-real`),
+8 build jobs, and a separate build directory per CUDA version and architecture.
+Use `-CudaPath "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"`,
+`-Architecture 89-real`, `-Jobs 4`, or `-BuildDir build-win-custom` to override.
+The script prints the resulting executable path when finished.
 
 `scripts/build-cuda.sh` sets `GGML_CUDA_FA_ALL_QUANTS=ON` (needed for `--kv-dtype q5_0` on hybrid models). Binaries: `build/bin/llama-kvmem-server`.
 
