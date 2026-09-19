@@ -300,7 +300,11 @@ int main(int argc, char ** argv) {
             kparams.nvme_dir = nvme_dir.c_str();
         }
         if (dump_kv) {
+#if defined(_WIN32)
+            _putenv_s("KVMEM_DUMP_CAPTURE", "1");
+#else
             setenv("KVMEM_DUMP_CAPTURE", "1", 1);
+#endif
         }
         if (query_last > 0 && n_prompt > 0) {
             const int last = std::min(query_last, n_prompt);

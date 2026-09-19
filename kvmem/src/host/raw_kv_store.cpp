@@ -4,18 +4,15 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
-#include <time.h>
+#include <chrono>
 #include <cstdlib>
 #include <stdexcept>
 #include <utility>
 
 namespace {
 uint64_t monotonic_ns() {
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
-           static_cast<uint64_t>(ts.tv_nsec);
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 } // namespace
 

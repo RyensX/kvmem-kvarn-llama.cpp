@@ -6,6 +6,7 @@
 // shared FILE* cursor so stage-out writes and stage-in reads may safely run on
 // different host workers. Batch spans coalesce adjacent full records into one
 // syscall when both their file offsets and buffer ranges are contiguous.
+// Windows uses serialized 64-bit CRT seek/read/write operations instead.
 
 #include <algorithm>
 #include <atomic>
@@ -26,7 +27,12 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#include <io.h>
+#include <filesystem>
+#else
 #include <unistd.h>
+#endif
 
 namespace kvmem {
 
@@ -99,6 +105,11 @@ struct NvmeBatchIoStats {
 };
 
 class NvmeKvTier {
+#if defined(_WIN32)
+    using file_offset_t = int64_t;
+#else
+    using file_offset_t = off_t;
+#endif
 public:
     explicit NvmeKvTier(NvmeKvTierConfig cfg) : cfg_(std::move(cfg)) {
         if (cfg_.slot_bytes > 0 && cfg_.total_bytes >= cfg_.slot_bytes) {
@@ -109,19 +120,19 @@ public:
 
         ensure_dir(cfg_.dir);
         if (cfg_.file_name.empty() ||
-            cfg_.file_name.find('/') != std::string::npos) {
+            cfg_.file_name.find_first_of("/\\") != std::string::npos) {
             throw std::runtime_error(
                 "NVMe KV tier file_name must be a non-empty basename");
         }
         path_ = cfg_.dir + "/" + cfg_.file_name;
-        int flags = O_CLOEXEC;
+        int flags = 0;
         if (cfg_.read_only) {
             flags |= O_RDONLY;
         } else {
             flags |= O_CREAT | O_RDWR;
             if (!cfg_.durable) flags |= O_TRUNC;
         }
-        fd_ = ::open(path_.c_str(), flags, 0644);
+        fd_ = open_file(path_, flags, !cfg_.durable);
         if (fd_ < 0) {
             throw std::runtime_error(
                 "failed to open NVMe KV tier file: " + path_ + ": " +
@@ -154,11 +165,11 @@ public:
         }
         if (cfg_.preallocate && !cfg_.read_only && cfg_.total_bytes > 0) {
             if (cfg_.total_bytes > static_cast<uint64_t>(
-                    std::numeric_limits<off_t>::max())) {
-                ::close(fd_);
+                    std::numeric_limits<file_offset_t>::max())) {
+                close_file(fd_);
                 fd_ = -1;
                 throw std::runtime_error(
-                    "NVMe KV tier preallocation exceeds off_t: " + path_);
+                    "NVMe KV tier preallocation exceeds file offset range: " + path_);
             }
 #if defined(__linux__)
             int rc;
@@ -167,7 +178,7 @@ public:
                     fd_, 0, static_cast<off_t>(cfg_.total_bytes));
             } while (rc == EINTR);
             if (rc != 0 && rc != EOPNOTSUPP && rc != ENOSYS && rc != EINVAL) {
-                ::close(fd_);
+                close_file(fd_);
                 fd_ = -1;
                 throw std::runtime_error(
                     "failed to preallocate NVMe KV tier file: " + path_ +
@@ -194,6 +205,7 @@ public:
                          static_cast<unsigned long long>(cfg_.total_bytes));
 #endif
         }
+#if !defined(_WIN32)
         if (!cfg_.durable) {
             // The backing store is an ephemeral cache, never a recoverable
             // checkpoint. Unlink it immediately while retaining the open file
@@ -204,13 +216,14 @@ public:
             // evaluations.
             if (::unlink(path_.c_str()) != 0) {
                 const int unlink_error = errno;
-                ::close(fd_);
+                close_file(fd_);
                 fd_ = -1;
                 throw std::runtime_error(
                     "failed to make NVMe KV tier file ephemeral: " + path_ +
                     ": " + std::strerror(unlink_error));
             }
         }
+#endif
         if (cfg_.read_only && !cfg_.overlay_dir.empty()) open_overlay();
         if (cfg_.direct_mapped) return;
         free_slots_.reserve(slot_count_);
@@ -224,9 +237,9 @@ public:
     NvmeKvTier &operator=(const NvmeKvTier &) = delete;
 
     ~NvmeKvTier() {
-        if (direct_fd_ >= 0) ::close(direct_fd_);
-        if (fd_ >= 0) ::close(fd_);
-        if (overlay_fd_ >= 0) ::close(overlay_fd_);
+        if (direct_fd_ >= 0) close_file(direct_fd_);
+        if (fd_ >= 0) close_file(fd_);
+        if (overlay_fd_ >= 0) close_file(overlay_fd_);
     }
 
     bool enabled() const { return fd_ >= 0 && slot_count_ > 0; }
@@ -418,7 +431,33 @@ public:
     }
 
 private:
+    static int open_file(const std::string &path, int flags, bool temporary) {
+#if defined(_WIN32)
+        // 二进制模式避免 CRLF 转换；临时文件由系统在最后一个句柄关闭时删除。
+        return ::_wopen(std::filesystem::u8path(path).c_str(),
+                       flags | _O_BINARY | _O_NOINHERIT | (temporary ? _O_TEMPORARY : 0),
+                       _S_IREAD | _S_IWRITE);
+#else
+        (void) temporary;
+        return ::open(path.c_str(), flags | O_CLOEXEC, 0644);
+#endif
+    }
+
+    static void close_file(int fd) {
+#if defined(_WIN32)
+        ::_close(fd);
+#else
+        ::close(fd);
+#endif
+    }
+
     static void ensure_dir(const std::string &dir) {
+#if defined(_WIN32)
+        const auto path = std::filesystem::u8path(dir);
+        if (!std::filesystem::is_directory(path) && !std::filesystem::create_directory(path)) {
+            throw std::runtime_error("failed to create NVMe KV tier directory: " + dir);
+        }
+#else
         struct stat st {};
         if (stat(dir.c_str(), &st) == 0) {
             if ((st.st_mode & S_IFDIR) == 0) {
@@ -431,6 +470,7 @@ private:
             throw std::runtime_error(
                 "failed to create NVMe KV tier directory: " + dir);
         }
+#endif
     }
 
     void validate_io(const void *data, uint64_t bytes,
@@ -496,14 +536,13 @@ private:
     void open_overlay() {
         ensure_dir(cfg_.overlay_dir);
         if (cfg_.overlay_file_name.empty() ||
-            cfg_.overlay_file_name.find('/') != std::string::npos) {
+            cfg_.overlay_file_name.find_first_of("/\\") != std::string::npos) {
             throw std::runtime_error(
                 "NVMe KV tier overlay_file_name must be a non-empty basename");
         }
         const std::string overlay_path =
             cfg_.overlay_dir + "/" + cfg_.overlay_file_name;
-        overlay_fd_ = ::open(overlay_path.c_str(),
-                             O_CLOEXEC | O_CREAT | O_RDWR | O_TRUNC, 0644);
+        overlay_fd_ = open_file(overlay_path, O_CREAT | O_RDWR | O_TRUNC, true);
         if (overlay_fd_ < 0) {
             throw std::runtime_error(
                 "failed to open NVMe KV tier overlay file: " + overlay_path +
@@ -512,14 +551,16 @@ private:
         // Same rationale as the ephemeral arena: the overlay is scratch that
         // must not outlive the process, and the file stays sparse so it costs
         // only the slots the session actually diverges on.
+#if !defined(_WIN32)
         if (::unlink(overlay_path.c_str()) != 0) {
             const int unlink_error = errno;
-            ::close(overlay_fd_);
+            close_file(overlay_fd_);
             overlay_fd_ = -1;
             throw std::runtime_error(
                 "failed to make NVMe KV tier overlay ephemeral: " +
                 overlay_path + ": " + std::strerror(unlink_error));
         }
+#endif
         overlay_valid_ = std::unique_ptr<std::atomic<uint8_t>[]>(
             new std::atomic<uint8_t>[slot_count_]);
         for (uint32_t i = 0; i < slot_count_; ++i) {
@@ -595,12 +636,22 @@ private:
 
     void pwrite_all(int fd, const void *data, uint64_t bytes,
                     uint64_t offset) const {
+#if defined(_WIN32)
+        // CRT 没有 pread/pwrite：定位和完整读写必须在同一把锁内，防止后台线程串位。
+        std::lock_guard<std::mutex> lock(io_mu_);
+        seek_file(fd, offset, bytes);
+#endif
         const uint8_t *src = static_cast<const uint8_t *>(data);
         uint64_t done = 0;
         while (done < bytes) {
+#if defined(_WIN32)
+            const int n = ::_write(fd, src + done, static_cast<unsigned int>(
+                std::min<uint64_t>(bytes - done, std::numeric_limits<int>::max())));
+#else
             const ssize_t n = ::pwrite(
                 fd, src + done, static_cast<size_t>(bytes - done),
                 static_cast<off_t>(offset + done));
+#endif
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) {
                 throw std::runtime_error(
@@ -613,12 +664,21 @@ private:
 
     void pread_all(int fd, void *data, uint64_t bytes,
                    uint64_t offset) const {
+#if defined(_WIN32)
+        std::lock_guard<std::mutex> lock(io_mu_);
+        seek_file(fd, offset, bytes);
+#endif
         uint8_t *dst = static_cast<uint8_t *>(data);
         uint64_t done = 0;
         while (done < bytes) {
+#if defined(_WIN32)
+            const int n = ::_read(fd, dst + done, static_cast<unsigned int>(
+                std::min<uint64_t>(bytes - done, std::numeric_limits<int>::max())));
+#else
             const ssize_t n = ::pread(
                 fd, dst + done, static_cast<size_t>(bytes - done),
                 static_cast<off_t>(offset + done));
+#endif
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) {
                 throw std::runtime_error(
@@ -627,6 +687,16 @@ private:
             done += static_cast<uint64_t>(n);
         }
     }
+
+#if defined(_WIN32)
+    static void seek_file(int fd, uint64_t offset, uint64_t bytes) {
+        const auto limit = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+        if (offset > limit || bytes > limit - offset ||
+                ::_lseeki64(fd, static_cast<int64_t>(offset), SEEK_SET) < 0) {
+            throw std::runtime_error("NVMe 64-bit file seek failed");
+        }
+    }
+#endif
 
     void run_spans(const std::vector<NvmeIoSpan> &spans, void *buffer,
                    uint64_t buffer_bytes, bool write,
@@ -772,7 +842,13 @@ private:
             std::lock_guard<std::mutex> lock(cache_drop_mu_);
             int rc;
             do {
+#if defined(_WIN32)
+                rc = ::_commit(fd);
+#elif defined(__APPLE__)
+                rc = ::fsync(fd);
+#else
                 rc = ::fdatasync(fd);
+#endif
             } while (rc != 0 && errno == EINTR);
             if (rc != 0) {
                 warn_cache_drop_failure("fdatasync", errno);
@@ -838,6 +914,9 @@ private:
     std::unique_ptr<std::atomic<uint8_t>[]> overlay_valid_;
     mutable std::mutex meta_mu_;
     mutable std::mutex cache_drop_mu_;
+#if defined(_WIN32)
+    mutable std::mutex io_mu_;
+#endif
     mutable std::atomic<bool> cache_drop_warned_{false};
     std::vector<int32_t> free_slots_;
     std::unordered_map<uint32_t, int32_t> block_to_slot_;
