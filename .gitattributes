@@ -1,2 +1,2 @@
 # Patch payloads preserve upstream whitespace verbatim.
-patches/*.patch -whitespace
+patches/*.patch text eol=lf -whitespace

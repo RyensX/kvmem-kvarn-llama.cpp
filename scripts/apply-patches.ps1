@@ -12,7 +12,7 @@ function Test-GitApply {
     try {
         # A failed applicability probe is expected, including stderr on PS 5.1.
         $ErrorActionPreference = "Continue"
-        git apply @Arguments 2>$null | Out-Null
+        $script:GitApplyDiagnostic = (git apply @Arguments 2>&1 | Out-String)
         return $LASTEXITCODE -eq 0
     }
     finally { $ErrorActionPreference = $SavedPreference }
@@ -21,12 +21,25 @@ function Test-GitApply {
 if (!(Test-Path (Join-Path $Llama '.git')) -or !(Test-Path (Join-Path $Llama 'CMakeLists.txt'))) {
     throw "Runtime submodule is not initialized: $Llama"
 }
+$TemporaryPatchDir = $null
 Push-Location $Llama
 try {
     $Head = (git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $Head -ne $Pin) {
         throw "llama.cpp is at $Head; expected $Pin; run git submodule sync --recursive followed by git submodule update --init --force --checkout llama.cpp"
     }
+
+    # Existing Windows checkouts may still contain CRLF patch headers even
+    # after pulling .gitattributes. Normalize temporary copies, not user files.
+    $TemporaryPatchDir = Join-Path ([IO.Path]::GetTempPath()) ("kvmem-patches-" + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($TemporaryPatchDir) | Out-Null
+    $Utf8 = New-Object System.Text.UTF8Encoding($false)
+    foreach ($Source in @($Patch, $WindowsUpgrade)) {
+        $Destination = Join-Path $TemporaryPatchDir ([IO.Path]::GetFileName($Source))
+        [IO.File]::WriteAllText($Destination, [IO.File]::ReadAllText($Source).Replace("`r`n", "`n"), $Utf8)
+    }
+    $Patch = Join-Path $TemporaryPatchDir 'llama-kvmem-current.patch'
+    $WindowsUpgrade = Join-Path $TemporaryPatchDir 'windows-jinja-encoding-upgrade.patch'
 
     if (Test-GitApply @('--reverse', '--check', $Patch)) {
         Write-Host "KVMem patches already applied"
@@ -40,6 +53,7 @@ try {
         Write-Host "applied KVMem runtime patch to BeeLlama $Pin"
         exit 0
     }
+    $FullPatchDiagnostic = $script:GitApplyDiagnostic
 
     if ((Test-GitApply @('--reverse', '--check', '--exclude=common/jinja/utils.h', $Patch)) -and (Test-GitApply @('--check', $WindowsUpgrade))) {
         git apply $WindowsUpgrade
@@ -49,8 +63,11 @@ try {
         exit 0
     }
 
-    throw "llama.cpp differs from the supported pin or already-patched tree"
+    throw "Runtime patch cannot be applied; no files changed. Git reported:`n$FullPatchDiagnostic`nUpgrade check:`n$script:GitApplyDiagnostic"
 }
 finally {
     Pop-Location
+    if ($TemporaryPatchDir) {
+        Remove-Item -LiteralPath $TemporaryPatchDir -Recurse -Force
+    }
 }
